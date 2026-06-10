@@ -3,138 +3,177 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>智慧油田注水开发动态调控系统</title>
+    <title>古代航海贸易网络重建与风暴风险分析系统</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js" />
     <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
-    <div class="app-container">
-        <header class="app-header">
-            <h1>智慧油田注水开发动态调控系统</h1>
-            <div class="header-info">
-                <span id="current-time">--</span>
-                <span class="status-indicator online">系统在线</span>
+    <div id="app">
+        <header id="app-header">
+            <div class="header-left">
+                <h1>⛵ 古代航海贸易网络重建与风暴风险分析</h1>
+                <span class="header-subtitle">公元前1000年 — 公元1800年</span>
+            </div>
+            <div class="header-right">
+                <div class="stats-bar" id="stats-bar">
+                    <span id="stat-voyages">航线: 0</span>
+                    <span id="stat-ports">港口: 0</span>
+                    <span id="stat-storms">风暴: 0</span>
+                </div>
             </div>
         </header>
 
-        <div class="main-content">
-            <aside class="left-panel">
-                <div class="panel-section">
-                    <h3>核心指标</h3>
-                    <div class="indicator-cards">
-                        <div class="indicator-card oil">
-                            <div class="indicator-label">日产油量</div>
-                            <div class="indicator-value" id="daily-oil">--</div>
-                            <div class="indicator-unit">t</div>
-                            <div class="indicator-change" id="oil-change">--</div>
-                        </div>
-                        <div class="indicator-card water">
-                            <div class="indicator-label">日注水量</div>
-                            <div class="indicator-value" id="daily-water">--</div>
-                            <div class="indicator-unit">m³</div>
-                            <div class="indicator-change" id="water-change">--</div>
-                        </div>
-                        <div class="indicator-card cut">
-                            <div class="indicator-label">综合含水率</div>
-                            <div class="indicator-value" id="water-cut">--</div>
-                            <div class="indicator-unit">%</div>
-                            <div class="indicator-change" id="cut-change">--</div>
-                        </div>
+        <div id="map-container">
+            <div id="map"></div>
+            <canvas id="canvas-overlay"></canvas>
+        </div>
+
+        <div id="sidebar">
+            <div class="sidebar-section">
+                <h3>📊 时间范围</h3>
+                <div class="timeline-control">
+                    <div class="timeline-labels">
+                        <span id="year-start-label">-1000</span>
+                        <span id="year-end-label">1800</span>
+                    </div>
+                    <div class="timeline-slider" id="timeline-slider">
+                        <div class="timeline-track"></div>
+                        <div class="timeline-range" id="timeline-range"></div>
+                        <div class="timeline-handle handle-start" id="handle-start" data-handle="start"></div>
+                        <div class="timeline-handle handle-end" id="handle-end" data-handle="end"></div>
+                    </div>
+                    <div class="timeline-era-labels">
+                        <span>青铜时代</span>
+                        <span>古典时代</span>
+                        <span>中世纪</span>
+                        <span>大航海</span>
                     </div>
                 </div>
+            </div>
 
-                <div class="panel-section">
-                    <h3>区块筛选</h3>
-                    <select id="block-selector" class="form-control">
-                        <option value="ALL">全部区块</option>
+            <div class="sidebar-section">
+                <h3>🔍 筛选条件</h3>
+                <div class="filter-group">
+                    <label>季节</label>
+                    <select id="filter-season">
+                        <option value="">全部</option>
+                        <option value="spring">春季</option>
+                        <option value="summer">夏季</option>
+                        <option value="autumn">秋季</option>
+                        <option value="winter">冬季</option>
                     </select>
                 </div>
+                <div class="filter-group">
+                    <label>货物类型</label>
+                    <select id="filter-cargo">
+                        <option value="">全部</option>
+                        <option value="grain">粮食</option>
+                        <option value="olive_oil">橄榄油</option>
+                        <option value="wine">葡萄酒</option>
+                        <option value="spices">香料</option>
+                        <option value="silk">丝绸</option>
+                        <option value="ceramics">陶瓷</option>
+                        <option value="ivory">象牙</option>
+                        <option value="gold">黄金</option>
+                        <option value="timber">木材</option>
+                        <option value="salt">盐</option>
+                        <option value="textiles">纺织品</option>
+                        <option value="glass">玻璃</option>
+                        <option value="incense">乳香</option>
+                        <option value="precious_stones">宝石</option>
+                        <option value="copper">铜</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label>船只类型</label>
+                    <select id="filter-ship">
+                        <option value="">全部</option>
+                        <option value="trireme">三列桨座战船</option>
+                        <option value="merchant_round_ship">商船</option>
+                        <option value="dhow">单桅三角帆船</option>
+                        <option value="junk">中国帆船</option>
+                        <option value="carrack">卡拉维尔帆船</option>
+                        <option value="longship">长船</option>
+                        <option value="galley">桨帆船</option>
+                        <option value="treasure_ship">宝船</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label>区域</label>
+                    <select id="filter-region">
+                        <option value="">全部</option>
+                        <option value="Mediterranean">地中海</option>
+                        <option value="Indian Ocean">印度洋</option>
+                        <option value="East Asia">东亚</option>
+                        <option value="Atlantic">大西洋</option>
+                        <option value="Red Sea">红海</option>
+                    </select>
+                </div>
+                <div class="filter-group checkbox-group">
+                    <label>
+                        <input type="checkbox" id="filter-storm" /> 仅显示风暴遇难点
+                    </label>
+                </div>
+                <button id="btn-apply-filters" class="btn-primary">应用筛选</button>
+            </div>
 
-                <div class="panel-section">
-                    <h3>图层控制</h3>
-                    <div class="layer-controls">
-                        <label class="checkbox-item">
-                            <input type="checkbox" id="show-injection" checked>
-                            <span class="legend-circle injection"></span>
-                            注水井
-                        </label>
-                        <label class="checkbox-item">
-                            <input type="checkbox" id="show-production" checked>
-                            <span class="legend-triangle production"></span>
-                            采油井
-                        </label>
-                        <label class="checkbox-item">
-                            <input type="checkbox" id="show-relations" checked>
-                            <span class="legend-line"></span>
-                            注采对应关系
-                        </label>
-                        <label class="checkbox-item">
-                            <input type="checkbox" id="show-allocation" checked>
-                            <span class="legend-arrow"></span>
-                            调配建议
-                        </label>
-                    </div>
+            <div class="sidebar-section">
+                <h3>🌐 贸易网络分析</h3>
+                <div class="analysis-controls">
+                    <button id="btn-network" class="btn-analysis">计算中介中心性</button>
+                    <button id="btn-community" class="btn-analysis">识别贸易社区</button>
+                    <button id="btn-hubs" class="btn-analysis">标记核心枢纽</button>
                 </div>
+                <div id="network-info" class="analysis-result"></div>
+            </div>
 
-                <div class="panel-section">
-                    <h3>注采受效图例</h3>
-                    <div class="legend-items">
-                        <div class="legend-item">
-                            <span class="legend-line" style="background: #00FF00;"></span>
-                            <span>高效受效</span>
-                        </div>
-                        <div class="legend-item">
-                            <span class="legend-line" style="background: #FFFF00;"></span>
-                            <span>中等受效</span>
-                        </div>
-                        <div class="legend-item">
-                            <span class="legend-line" style="background: #FF0000;"></span>
-                            <span>无效受效</span>
-                        </div>
-                    </div>
+            <div class="sidebar-section">
+                <h3>🌀 风暴风险分析</h3>
+                <div class="analysis-controls">
+                    <select id="storm-model">
+                        <option value="logistic_regression">逻辑回归</option>
+                        <option value="random_forest">随机森林</option>
+                    </select>
+                    <button id="btn-storm" class="btn-analysis">分析风暴风险</button>
+                    <button id="btn-heatmap" class="btn-analysis">显示热力图</button>
                 </div>
+                <div id="storm-info" class="analysis-result"></div>
+            </div>
 
-                <div class="panel-section">
-                    <h3>告警信息 <span class="badge" id="alarm-badge">0</span></h3>
-                    <div class="alarm-list" id="alarm-list">
-                        <div class="no-data">暂无告警</div>
-                    </div>
+            <div class="sidebar-section">
+                <h3>🗺️ 图层控制</h3>
+                <div class="layer-controls">
+                    <label><input type="checkbox" id="layer-routes" checked /> 航线</label>
+                    <label><input type="checkbox" id="layer-ports" checked /> 港口</label>
+                    <label><input type="checkbox" id="layer-storms" checked /> 风暴标记</label>
+                    <label><input type="checkbox" id="layer-network" /> 贸易网络</label>
+                    <label><input type="checkbox" id="layer-heatmap" /> 风暴热力图</label>
+                    <label><input type="checkbox" id="layer-currents" /> 洋流</label>
                 </div>
-            </aside>
+            </div>
+        </div>
 
-            <main class="map-container">
-                <div id="map"></div>
-                <canvas id="well-canvas"></canvas>
-                <div class="map-controls">
-                    <button class="control-btn" onclick="refreshAllData()">
-                        <span>🔄</span> 刷新数据
-                    </button>
-                    <button class="control-btn" onclick="runAllocation()">
-                        <span>📊</span> 生成调配建议
-                    </button>
-                    <button class="control-btn" onclick="checkAlarms()">
-                        <span>⚠️</span> 检查告警
-                    </button>
-                </div>
-            </main>
+        <div id="voyage-panel" class="panel hidden">
+            <div class="panel-header">
+                <h3>🚢 航行详情</h3>
+                <button id="panel-close" class="btn-close">&times;</button>
+            </div>
+            <div id="panel-content" class="panel-body"></div>
+        </div>
 
-            <aside class="right-panel" id="detail-panel" style="display: none;">
-                <div class="panel-header">
-                    <h3 id="detail-title">井详情</h3>
-                    <button class="close-btn" onclick="closeDetailPanel()">×</button>
-                </div>
-                <div class="panel-content" id="detail-content">
-                </div>
-            </aside>
+        <div id="loading" class="hidden">
+            <div class="spinner"></div>
+            <span>计算中...</span>
         </div>
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <script src="js/config.js"></script>
-    <script src="js/api.js"></script>
-    <script src="js/map.js"></script>
-    <script src="js/charts.js"></script>
+    <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
     <script src="js/app.js"></script>
+    <script src="js/map.js"></script>
+    <script src="js/timeline.js"></script>
+    <script src="js/network.js"></script>
+    <script src="js/storm.js"></script>
 </body>
 </html>

@@ -1,0 +1,322 @@
+[
+  {
+    "id": 1,
+    "name": "Alexandria",
+    "name_zh": "亚历山大港",
+    "region": "Mediterranean",
+    "lat": 31.2001,
+    "lon": 29.9187
+  },
+  {
+    "id": 2,
+    "name": "Carthage",
+    "name_zh": "迦太基",
+    "region": "Mediterranean",
+    "lat": 36.8489,
+    "lon": 10.3263
+  },
+  {
+    "id": 3,
+    "name": "Rome_Ostia",
+    "name_zh": "奥斯提亚",
+    "region": "Mediterranean",
+    "lat": 41.7333,
+    "lon": 12.2833
+  },
+  {
+    "id": 4,
+    "name": "Athens_Piraeus",
+    "name_zh": "比雷埃夫斯",
+    "region": "Mediterranean",
+    "lat": 37.9394,
+    "lon": 23.6436
+  },
+  {
+    "id": 5,
+    "name": "Constantinople",
+    "name_zh": "君士坦丁堡",
+    "region": "Mediterranean",
+    "lat": 41.0082,
+    "lon": 28.9784
+  },
+  {
+    "id": 6,
+    "name": "Tyre",
+    "name_zh": "推罗",
+    "region": "Mediterranean",
+    "lat": 33.2711,
+    "lon": 35.2033
+  },
+  {
+    "id": 7,
+    "name": "Byblos",
+    "name_zh": "比布鲁斯",
+    "region": "Mediterranean",
+    "lat": 34.1214,
+    "lon": 35.6497
+  },
+  {
+    "id": 8,
+    "name": "Rhodes",
+    "name_zh": "罗德岛",
+    "region": "Mediterranean",
+    "lat": 36.4341,
+    "lon": 28.2176
+  },
+  {
+    "id": 9,
+    "name": "Crete_Knossos",
+    "name_zh": "克里特-克诺索斯",
+    "region": "Mediterranean",
+    "lat": 35.2956,
+    "lon": 25.1639
+  },
+  {
+    "id": 10,
+    "name": "Syracuse",
+    "name_zh": "叙拉古",
+    "region": "Mediterranean",
+    "lat": 37.0755,
+    "lon": 15.2861
+  },
+  {
+    "id": 11,
+    "name": "Massalia",
+    "name_zh": "马西利亚",
+    "region": "Mediterranean",
+    "lat": 43.2965,
+    "lon": 5.3698
+  },
+  {
+    "id": 12,
+    "name": "Gades",
+    "name_zh": "加的斯",
+    "region": "Mediterranean",
+    "lat": 36.5298,
+    "lon": -6.2926
+  },
+  {
+    "id": 13,
+    "name": "Mogador",
+    "name_zh": "莫加多尔",
+    "region": "Atlantic",
+    "lat": 31.5085,
+    "lon": -9.7696
+  },
+  {
+    "id": 14,
+    "name": "Mombasa",
+    "name_zh": "蒙巴萨",
+    "region": "Indian Ocean",
+    "lat": -4.05,
+    "lon": 39.6667
+  },
+  {
+    "id": 15,
+    "name": "Kilwa",
+    "name_zh": "基尔瓦",
+    "region": "Indian Ocean",
+    "lat": -8.94,
+    "lon": 39.5067
+  },
+  {
+    "id": 16,
+    "name": "Aden",
+    "name_zh": "亚丁",
+    "region": "Indian Ocean",
+    "lat": 12.7794,
+    "lon": 45.0367
+  },
+  {
+    "id": 17,
+    "name": "Muziris",
+    "name_zh": "穆吉里斯",
+    "region": "Indian Ocean",
+    "lat": 10.1593,
+    "lon": 76.2214
+  },
+  {
+    "id": 18,
+    "name": "Barigaza",
+    "name_zh": "婆卢羯车",
+    "region": "Indian Ocean",
+    "lat": 21.7645,
+    "lon": 72.1538
+  },
+  {
+    "id": 19,
+    "name": "Tamralipti",
+    "name_zh": "耽摩栗底",
+    "region": "Indian Ocean",
+    "lat": 21.8912,
+    "lon": 87.7886
+  },
+  {
+    "id": 20,
+    "name": "Gwangju_Beopseongpo",
+    "name_zh": "法圣浦",
+    "region": "East Asia",
+    "lat": 35.1269,
+    "lon": 126.8167
+  },
+  {
+    "id": 21,
+    "name": "Quanzhou",
+    "name_zh": "泉州",
+    "region": "East Asia",
+    "lat": 24.8741,
+    "lon": 118.6758
+  },
+  {
+    "id": 22,
+    "name": "Guangzhou",
+    "name_zh": "广州",
+    "region": "East Asia",
+    "lat": 23.1291,
+    "lon": 113.2644
+  },
+  {
+    "id": 23,
+    "name": "Calicut",
+    "name_zh": "卡利卡特",
+    "region": "Indian Ocean",
+    "lat": 11.2588,
+    "lon": 75.7804
+  },
+  {
+    "id": 24,
+    "name": "Hormuz",
+    "name_zh": "霍尔木兹",
+    "region": "Indian Ocean",
+    "lat": 27.0461,
+    "lon": 56.4611
+  },
+  {
+    "id": 25,
+    "name": "Basra",
+    "name_zh": "巴士拉",
+    "region": "Indian Ocean",
+    "lat": 30.5028,
+    "lon": 47.8275
+  },
+  {
+    "id": 26,
+    "name": "Jeddah",
+    "name_zh": "吉达",
+    "region": "Red Sea",
+    "lat": 21.5433,
+    "lon": 39.1728
+  },
+  {
+    "id": 27,
+    "name": "Aila",
+    "name_zh": "埃拉",
+    "region": "Red Sea",
+    "lat": 29.5234,
+    "lon": 34.9739
+  },
+  {
+    "id": 28,
+    "name": "Berenice",
+    "name_zh": "贝雷尼塞",
+    "region": "Red Sea",
+    "lat": 23.9117,
+    "lon": 35.4794
+  },
+  {
+    "id": 29,
+    "name": "Malacca",
+    "name_zh": "马六甲",
+    "region": "East Asia",
+    "lat": 2.1896,
+    "lon": 102.2501
+  },
+  {
+    "id": 30,
+    "name": "Srivijaya",
+    "name_zh": "室利佛逝",
+    "region": "East Asia",
+    "lat": -2.95,
+    "lon": 104.75
+  },
+  {
+    "id": 31,
+    "name": "Zanzibar",
+    "name_zh": "桑给巴尔",
+    "region": "Indian Ocean",
+    "lat": -6.1659,
+    "lon": 39.1989
+  },
+  {
+    "id": 32,
+    "name": "Sofala",
+    "name_zh": "索法拉",
+    "region": "Indian Ocean",
+    "lat": -20.15,
+    "lon": 34.75
+  },
+  {
+    "id": 33,
+    "name": "Canton_Han",
+    "name_zh": "广州(汉)",
+    "region": "East Asia",
+    "lat": 23.1291,
+    "lon": 113.2644
+  },
+  {
+    "id": 34,
+    "name": "Nagasaki",
+    "name_zh": "长崎",
+    "region": "East Asia",
+    "lat": 32.7503,
+    "lon": 129.8779
+  },
+  {
+    "id": 35,
+    "name": "Lisbon",
+    "name_zh": "里斯本",
+    "region": "Atlantic",
+    "lat": 38.7223,
+    "lon": -9.1393
+  },
+  {
+    "id": 36,
+    "name": "Bristol",
+    "name_zh": "布里斯托尔",
+    "region": "Atlantic",
+    "lat": 51.4545,
+    "lon": -2.5879
+  },
+  {
+    "id": 37,
+    "name": "Venice",
+    "name_zh": "威尼斯",
+    "region": "Mediterranean",
+    "lat": 45.4408,
+    "lon": 12.3155
+  },
+  {
+    "id": 38,
+    "name": "Genoa",
+    "name_zh": "热那亚",
+    "region": "Mediterranean",
+    "lat": 44.4056,
+    "lon": 8.9463
+  },
+  {
+    "id": 39,
+    "name": "Hamburg",
+    "name_zh": "汉堡",
+    "region": "Atlantic",
+    "lat": 53.5511,
+    "lon": 9.9937
+  },
+  {
+    "id": 40,
+    "name": "Bergen",
+    "name_zh": "卑尔根",
+    "region": "Atlantic",
+    "lat": 60.3913,
+    "lon": 5.3221
+  }
+]

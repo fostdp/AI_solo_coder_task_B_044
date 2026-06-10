@@ -1,423 +1,271 @@
-let currentBlock = 'ALL';
-let refreshTimer = null;
+const API_BASE = '/api';
 
-document.addEventListener('DOMContentLoaded', () => {
-    init();
-});
+const AppState = {
+    yearStart: -1000,
+    yearEnd: 1800,
+    season: '',
+    cargoType: '',
+    shipType: '',
+    region: '',
+    stormOnly: false,
+    voyages: [],
+    ports: [],
+    networkData: null,
+    stormData: null,
+    heatmapLayer: null,
+    layers: {
+        routes: true,
+        ports: true,
+        storms: true,
+        network: false,
+        heatmap: false,
+        currents: false,
+    },
+};
 
-async function init() {
-    MapManager.init();
-    setupEventListeners();
-    await loadBlocks();
-    await refreshAllData();
-    startAutoRefresh();
-    updateCurrentTime();
-    setInterval(updateCurrentTime, 1000);
-}
+const SEASON_COLORS = {
+    spring: '#44ff88',
+    summer: '#ffd700',
+    autumn: '#ff8844',
+    winter: '#4a9eff',
+};
 
-function setupEventListeners() {
-    document.getElementById('block-selector').addEventListener('change', (e) => {
-        currentBlock = e.target.value;
-        MapManager.setBlock(currentBlock);
-        refreshCoreIndicators();
-    });
+const CARGO_COLORS = {
+    grain: '#c8a96e',
+    olive_oil: '#a4c639',
+    wine: '#8b2252',
+    spices: '#ff6347',
+    silk: '#da70d6',
+    ceramics: '#87ceeb',
+    ivory: '#fffff0',
+    gold: '#ffd700',
+    timber: '#8b4513',
+    salt: '#f0f0f0',
+    textiles: '#dda0dd',
+    glass: '#00ced1',
+    incense: '#daa520',
+    precious_stones: '#ee82ee',
+    copper: '#b87333',
+};
 
-    document.getElementById('show-injection').addEventListener('change', (e) => {
-        MapManager.setLayerVisibility('injection', e.target.checked);
-    });
+const SEASON_ZH = {
+    spring: '春季',
+    summer: '夏季',
+    autumn: '秋季',
+    winter: '冬季',
+};
 
-    document.getElementById('show-production').addEventListener('change', (e) => {
-        MapManager.setLayerVisibility('production', e.target.checked);
-    });
+const SHIP_ZH = {
+    trireme: '三列桨座战船',
+    merchant_round_ship: '商船',
+    dhow: '单桅三角帆船',
+    junk: '中国帆船',
+    carrack: '卡拉维尔帆船',
+    longship: '长船',
+    galley: '桨帆船',
+    treasure_ship: '宝船',
+};
 
-    document.getElementById('show-relations').addEventListener('change', (e) => {
-        MapManager.setLayerVisibility('relations', e.target.checked);
-    });
+const CARGO_ZH = {
+    grain: '粮食',
+    olive_oil: '橄榄油',
+    wine: '葡萄酒',
+    spices: '香料',
+    silk: '丝绸',
+    ceramics: '陶瓷',
+    ivory: '象牙',
+    gold: '黄金',
+    timber: '木材',
+    salt: '盐',
+    textiles: '纺织品',
+    glass: '玻璃',
+    incense: '乳香',
+    precious_stones: '宝石',
+    copper: '铜',
+};
 
-    document.getElementById('show-allocation').addEventListener('change', (e) => {
-        MapManager.setLayerVisibility('allocation', e.target.checked);
-    });
-}
-
-async function loadBlocks() {
-    try {
-        const data = await API.getBlocks();
-        const selector = document.getElementById('block-selector');
-        
-        for (const block of data.blocks || []) {
-            const option = document.createElement('option');
-            option.value = block;
-            option.textContent = block;
-            selector.appendChild(option);
+async function apiFetch(endpoint, params = {}) {
+    const url = new URL(API_BASE + endpoint, window.location.origin);
+    Object.entries(params).forEach(([k, v]) => {
+        if (v !== '' && v !== null && v !== undefined) {
+            url.searchParams.set(k, v);
         }
-    } catch (error) {
-        console.error('Failed to load blocks:', error);
-    }
-}
-
-async function refreshAllData() {
-    await Promise.all([
-        MapManager.loadData(),
-        refreshCoreIndicators(),
-        refreshAlarms()
-    ]);
-}
-
-async function refreshCoreIndicators() {
-    try {
-        const data = await API.getCoreIndicators(currentBlock);
-        
-        document.getElementById('daily-oil').textContent = 
-            data.dailyOilProduction?.toFixed(2) || '--';
-        document.getElementById('daily-water').textContent = 
-            data.dailyWaterInjection?.toFixed(2) || '--';
-        document.getElementById('water-cut').textContent = 
-            data.comprehensiveWaterCut?.toFixed(2) || '--';
-
-        const changes = data.dayOverDayChanges || {};
-        
-        const oilChangeEl = document.getElementById('oil-change');
-        const waterChangeEl = document.getElementById('water-change');
-        const cutChangeEl = document.getElementById('cut-change');
-
-        updateChangeIndicator(oilChangeEl, changes.oilChange, true);
-        updateChangeIndicator(waterChangeEl, changes.waterChange, false);
-        updateChangeIndicator(cutChangeEl, changes.waterCutChange, false);
-
-    } catch (error) {
-        console.error('Failed to refresh core indicators:', error);
-    }
-}
-
-function updateChangeIndicator(element, value, isOil) {
-    if (value === undefined || value === null) {
-        element.textContent = '--';
-        element.className = 'indicator-change';
-        return;
-    }
-
-    const prefix = value >= 0 ? '+' : '';
-    element.textContent = `${prefix}${value.toFixed(2)}%`;
-    
-    if (isOil) {
-        element.className = value >= 0 ? 'indicator-change positive' : 'indicator-change negative';
-    } else {
-        element.className = value <= 0 ? 'indicator-change positive' : 'indicator-change negative';
-    }
-}
-
-async function refreshAlarms() {
-    try {
-        const data = await API.getAlarms();
-        
-        document.getElementById('alarm-badge').textContent = data.count || 0;
-        
-        const alarmListEl = document.getElementById('alarm-list');
-        
-        if (!data.alarms || data.alarms.length === 0) {
-            alarmListEl.innerHTML = '<div class="no-data">暂无告警</div>';
-            return;
-        }
-
-        alarmListEl.innerHTML = data.alarms.slice(0, 10).map(alarm => `
-            <div class="alarm-item level-${alarm.alarmLevel === 'LEVEL_1' ? '1' : '2'}" 
-                 onclick="handleAlarmClick(${alarm.id}, '${alarm.wellId}')">
-                <div class="alarm-type">${alarm.alarmLevel === 'LEVEL_1' ? '一级水淹预警' : '二级井筒异常'}</div>
-                <div class="alarm-message">${alarm.alarmMessage}</div>
-                <div class="alarm-time">${formatTime(alarm.alarmTime)}</div>
-            </div>
-        `).join('');
-
-    } catch (error) {
-        console.error('Failed to refresh alarms:', error);
-    }
-}
-
-function handleAlarmClick(alarmId, wellId) {
-    API.acknowledgeAlarm(alarmId).then(() => {
-        refreshAlarms();
     });
-    
-    if (wellId) {
-        API.getWellById(wellId).then(well => {
-            if (well) {
-                MapManager.selectWell(well);
-                MapManager.map.flyTo([well.latitude, well.longitude], 14);
-            }
-        });
-    }
+    const resp = await fetch(url.toString());
+    if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+    return resp.json();
 }
 
-async function showWellDetail(well) {
-    const panel = document.getElementById('detail-panel');
-    const titleEl = document.getElementById('detail-title');
-    const contentEl = document.getElementById('detail-content');
+function showLoading() {
+    document.getElementById('loading').classList.remove('hidden');
+}
 
-    titleEl.textContent = `${well.wellName} - ${well.wellType === 'INJECTION' ? '注水井' : '采油井'}`;
-    panel.style.display = 'flex';
+function hideLoading() {
+    document.getElementById('loading').classList.add('hidden');
+}
 
-    contentEl.innerHTML = `
-        <div class="well-info-grid">
-            <div class="info-item">
-                <div class="info-label">井号</div>
-                <div class="info-value">${well.wellId}</div>
-            </div>
-            <div class="info-item">
-                <div class="info-label">区块</div>
-                <div class="info-value">${well.blockName}</div>
-            </div>
-            <div class="info-item">
-                <div class="info-label">状态</div>
-                <div class="info-value">${well.status === 'ACTIVE' ? '正常' : '停用'}</div>
-            </div>
-            <div class="info-item">
-                <div class="info-label">经度</div>
-                <div class="info-value">${well.longitude?.toFixed(6) || '--'}</div>
-            </div>
-            <div class="info-item">
-                <div class="info-label">纬度</div>
-                <div class="info-value">${well.latitude?.toFixed(6) || '--'}</div>
-            </div>
-            ${well.wellType === 'INJECTION' ? `
-                <div class="info-item">
-                    <div class="info-label">设计压力</div>
-                    <div class="info-value">${well.designPressure?.toFixed(2) || '--'} MPa</div>
-                </div>
-                <div class="info-item">
-                    <div class="info-label">日注水量</div>
-                    <div class="info-value">${well.latestWaterVolume?.toFixed(2) || '--'} m³</div>
-                </div>
-                <div class="info-item">
-                    <div class="info-label">注水压力</div>
-                    <div class="info-value">${well.latestInjectionPressure?.toFixed(2) || '--'} MPa</div>
-                </div>
-            ` : `
-                <div class="info-item">
-                    <div class="info-label">日产油量</div>
-                    <div class="info-value">${well.latestOilVolume?.toFixed(2) || '--'} t</div>
-                </div>
-                <div class="info-item">
-                    <div class="info-label">含水率</div>
-                    <div class="info-value">${well.latestWaterCut?.toFixed(2) || '--'}%</div>
-                </div>
-            `}
-        </div>
+function updateStats(stats) {
+    document.getElementById('stat-voyages').textContent = `航线: ${stats.total_voyages || 0}`;
+    document.getElementById('stat-ports').textContent = `港口: ${stats.total_ports || 0}`;
+    document.getElementById('stat-storms').textContent = `风暴: ${stats.storm_encounters || 0}`;
+}
 
-        <div class="chart-container">
-            <h4>近90天生产趋势</h4>
-            <div class="chart-wrapper">
-                <canvas id="trend-chart"></canvas>
-            </div>
-        </div>
-
-        <div class="chart-container">
-            <h4>注采对应分析</h4>
-            <div class="chart-wrapper">
-                <canvas id="relation-chart"></canvas>
-            </div>
-        </div>
-
-        <div id="allocation-section" style="${well.wellType === 'INJECTION' ? '' : 'display: none;'}">
-            <div class="chart-container">
-                <h4>最新调配建议</h4>
-                <div id="allocation-content">
-                    <div class="no-data">加载中...</div>
-                </div>
-            </div>
-        </div>
-
-        <div class="relation-analysis">
-            <h4>注采对应关系</h4>
-            <div id="relation-list">
-                <div class="no-data">加载中...</div>
-            </div>
-        </div>
-    `;
-
+async function loadInitialData() {
     try {
-        const [trendData, relations, suggestions] = await Promise.all([
-            API.getWellTrend(well.wellId, 90),
-            API.getRelationsByWell(well.wellId, well.wellType),
-            well.wellType === 'INJECTION' ? API.getLatestSuggestions() : null
+        const [portsResp, statsResp] = await Promise.all([
+            apiFetch('/ports'),
+            apiFetch('/stats'),
         ]);
-
-        if (trendData) {
-            ChartManager.createProductionTrend('trend-chart', trendData);
-        }
-
-        if (well.wellType === 'INJECTION') {
-            const wellSuggestion = suggestions?.suggestions?.find(s => s.wellId === well.wellId);
-            renderAllocationSuggestion(wellSuggestion);
-        }
-
-        renderRelationAnalysis(relations, well.wellType);
-
-        const relatedWellTrend = await getRelatedWellTrend(well, relations);
-        if (relatedWellTrend) {
-            ChartManager.createInjectionProductionAnalysis('relation-chart', trendData, relatedWellTrend);
-        }
-
-    } catch (error) {
-        console.error('Failed to load well detail:', error);
+        AppState.ports = portsResp.ports || [];
+        updateStats(statsResp);
+        return true;
+    } catch (e) {
+        console.error('Failed to load initial data:', e);
+        return false;
     }
 }
 
-function closeDetailPanel() {
-    document.getElementById('detail-panel').style.display = 'none';
-    MapManager.selectedWell = null;
-    MapManager.render();
-    ChartManager.destroyAll();
+async function loadVoyages() {
+    showLoading();
+    try {
+        const params = {
+            year_start: AppState.yearStart,
+            year_end: AppState.yearEnd,
+        };
+        if (AppState.season) params.season = AppState.season;
+        if (AppState.cargoType) params.cargo_type = AppState.cargoType;
+        if (AppState.shipType) params.ship_type = AppState.shipType;
+        if (AppState.region) params.region = AppState.region;
+        if (AppState.stormOnly) params.encountered_storm = true;
+
+        const resp = await apiFetch('/voyages', params);
+        AppState.voyages = resp.voyages || [];
+        return AppState.voyages;
+    } catch (e) {
+        console.error('Failed to load voyages:', e);
+        return [];
+    } finally {
+        hideLoading();
+    }
 }
 
-async function getRelatedWellTrend(well, relations) {
-    if (!relations || relations.length === 0) return null;
+function initEventListeners() {
+    document.getElementById('btn-apply-filters').addEventListener('click', async () => {
+        AppState.season = document.getElementById('filter-season').value;
+        AppState.cargoType = document.getElementById('filter-cargo').value;
+        AppState.shipType = document.getElementById('filter-ship').value;
+        AppState.region = document.getElementById('filter-region').value;
+        AppState.stormOnly = document.getElementById('filter-storm').checked;
+        await loadVoyages();
+        renderMapLayers();
+    });
 
-    let relatedWellId = null;
-    if (well.wellType === 'INJECTION') {
-        relatedWellId = relations[0]?.productionWellId;
-    } else {
-        relatedWellId = relations[0]?.injectionWellId;
-    }
+    document.getElementById('btn-network').addEventListener('click', async () => {
+        await loadNetworkAnalysis();
+    });
 
-    if (!relatedWellId) return null;
+    document.getElementById('btn-community').addEventListener('click', () => {
+        if (AppState.networkData) {
+            renderCommunityColors();
+        } else {
+            document.getElementById('network-info').innerHTML = '<p style="color:var(--accent-red)">请先计算贸易网络</p>';
+        }
+    });
 
-    return await API.getWellTrend(relatedWellId, 90);
+    document.getElementById('btn-hubs').addEventListener('click', () => {
+        if (AppState.networkData) {
+            renderHubPorts();
+        } else {
+            document.getElementById('network-info').innerHTML = '<p style="color:var(--accent-red)">请先计算贸易网络</p>';
+        }
+    });
+
+    document.getElementById('btn-storm').addEventListener('click', async () => {
+        await loadStormRisk();
+    });
+
+    document.getElementById('btn-heatmap').addEventListener('click', () => {
+        toggleHeatmap();
+    });
+
+    document.getElementById('panel-close').addEventListener('click', () => {
+        document.getElementById('voyage-panel').classList.add('hidden');
+    });
+
+    document.getElementById('layer-routes').addEventListener('change', (e) => {
+        AppState.layers.routes = e.target.checked;
+        renderMapLayers();
+    });
+    document.getElementById('layer-ports').addEventListener('change', (e) => {
+        AppState.layers.ports = e.target.checked;
+        renderMapLayers();
+    });
+    document.getElementById('layer-storms').addEventListener('change', (e) => {
+        AppState.layers.storms = e.target.checked;
+        renderMapLayers();
+    });
+    document.getElementById('layer-network').addEventListener('change', (e) => {
+        AppState.layers.network = e.target.checked;
+        renderMapLayers();
+    });
+    document.getElementById('layer-heatmap').addEventListener('change', (e) => {
+        AppState.layers.heatmap = e.target.checked;
+        toggleHeatmap();
+    });
+    document.getElementById('layer-currents').addEventListener('change', (e) => {
+        AppState.layers.currents = e.target.checked;
+        renderMapLayers();
+    });
 }
 
-function renderAllocationSuggestion(suggestion) {
-    const contentEl = document.getElementById('allocation-content');
-    
-    if (!suggestion) {
-        contentEl.innerHTML = '<div class="no-data">暂无调配建议</div>';
-        return;
-    }
+function showVoyageDetail(voyage) {
+    const panel = document.getElementById('voyage-panel');
+    const content = document.getElementById('panel-content');
+    panel.classList.remove('hidden');
 
-    contentEl.innerHTML = `
-        <div class="allocation-item">
-            <div class="allocation-header">
-                <span>建议日期: ${suggestion.suggestionDate}</span>
-                <span class="direction ${suggestion.adjustmentDirection}">
-                    ${suggestion.adjustmentDirection === 'INCREASE' ? '增加' : 
-                      suggestion.adjustmentDirection === 'DECREASE' ? '减少' : '保持'}
-                </span>
-            </div>
-            <div style="display: flex; gap: 20px; margin-bottom: 8px;">
-                <div>
-                    <div class="info-label">当前注水量</div>
-                    <div class="info-value">${suggestion.currentWaterVolume.toFixed(2)} m³</div>
-                </div>
-                <div>
-                    <div class="info-label">建议注水量</div>
-                    <div class="info-value">${suggestion.suggestedWaterVolume.toFixed(2)} m³</div>
-                </div>
-                <div>
-                    <div class="info-label">调整量</div>
-                    <div class="info-value" style="color: ${
-                        suggestion.adjustmentAmount > 0 ? '#4caf50' : 
-                        suggestion.adjustmentAmount < 0 ? '#f44336' : '#9e9e9e'
-                    }">
-                        ${suggestion.adjustmentAmount > 0 ? '+' : ''}${suggestion.adjustmentAmount.toFixed(2)} m³
-                    </div>
-                </div>
-            </div>
-            <div class="reason">${suggestion.reason || '暂无详细说明'}</div>
+    content.innerHTML = `
+        <div class="detail-row">
+            <span class="detail-label">出发港</span>
+            <span class="detail-value">${voyage.departure_port_zh || voyage.departure_port}</span>
+        </div>
+        <div class="detail-row">
+            <span class="detail-label">目的港</span>
+            <span class="detail-value">${voyage.arrival_port_zh || voyage.arrival_port}</span>
+        </div>
+        <div class="detail-row">
+            <span class="detail-label">年份</span>
+            <span class="detail-value">${voyage.voyage_year < 0 ? '公元前' + Math.abs(voyage.voyage_year) + '年' : '公元' + voyage.voyage_year + '年'}</span>
+        </div>
+        <div class="detail-row">
+            <span class="detail-label">季节</span>
+            <span class="detail-value">${SEASON_ZH[voyage.season] || voyage.season}</span>
+        </div>
+        <div class="detail-row">
+            <span class="detail-label">船只类型</span>
+            <span class="detail-value">${SHIP_ZH[voyage.ship_type] || voyage.ship_type}</span>
+        </div>
+        <div class="detail-row">
+            <span class="detail-label">货物类型</span>
+            <span class="detail-value">${CARGO_ZH[voyage.cargo_type] || voyage.cargo_type}</span>
+        </div>
+        <div class="detail-row">
+            <span class="detail-label">遭遇风暴</span>
+            <span class="detail-value ${voyage.encountered_storm ? 'storm-yes' : 'storm-no'}">
+                ${voyage.encountered_storm ? '⚡ 是' : '✓ 否'}
+            </span>
         </div>
     `;
 }
 
-function renderRelationAnalysis(relations, wellType) {
-    const listEl = document.getElementById('relation-list');
-    
-    if (!relations || relations.length === 0) {
-        listEl.innerHTML = '<div class="no-data">暂无注采对应关系</div>';
-        return;
+document.addEventListener('DOMContentLoaded', async () => {
+    initMap();
+    initTimeline();
+    initEventListeners();
+
+    const ok = await loadInitialData();
+    if (ok) {
+        renderPorts();
+        await loadVoyages();
+        renderMapLayers();
     }
-
-    const getEffectivenessClass = (type) => {
-        switch (type) {
-            case 'HIGH': return 'high';
-            case 'MEDIUM': return 'medium';
-            case 'LOW': return 'low';
-            default: return '';
-        }
-    };
-
-    const getEffectivenessText = (type) => {
-        switch (type) {
-            case 'HIGH': return '高效';
-            case 'MEDIUM': return '中等';
-            case 'LOW': return '无效';
-            default: return '未知';
-        }
-    };
-
-    listEl.innerHTML = relations.slice(0, 8).map(rel => {
-        const relatedWellId = wellType === 'INJECTION' ? rel.productionWellId : rel.injectionWellId;
-        return `
-            <div class="relation-item ${getEffectivenessClass(rel.effectivenessType)}">
-                <span class="well-name">${relatedWellId}</span>
-                <span class="effectiveness">
-                    ${getEffectivenessText(rel.effectivenessType)}
-                    ${rel.effectivenessDegree ? `(${rel.effectivenessDegree.toFixed(1)}%)` : ''}
-                </span>
-            </div>
-        `;
-    }).join('');
-}
-
-async function runAllocation() {
-    if (confirm('确定要立即生成注水调配建议吗？此过程可能需要几秒钟。')) {
-        try {
-            await API.runAllocation();
-            await MapManager.loadData();
-            alert('调配建议生成成功！');
-        } catch (error) {
-            console.error('Failed to run allocation:', error);
-            alert('调配建议生成失败，请检查后端服务。');
-        }
-    }
-}
-
-async function checkAlarms() {
-    try {
-        await API.checkAlarms();
-        await refreshAlarms();
-        alert('告警检查完成！');
-    } catch (error) {
-        console.error('Failed to check alarms:', error);
-        alert('告警检查失败，请检查后端服务。');
-    }
-}
-
-function startAutoRefresh() {
-    if (refreshTimer) {
-        clearInterval(refreshTimer);
-    }
-    refreshTimer = setInterval(() => {
-        refreshAllData();
-    }, CONFIG.REFRESH_INTERVAL);
-}
-
-function updateCurrentTime() {
-    const now = new Date();
-    const timeStr = now.toLocaleString('zh-CN', {
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit'
-    });
-    document.getElementById('current-time').textContent = timeStr;
-}
-
-function formatTime(timeStr) {
-    if (!timeStr) return '--';
-    const date = new Date(timeStr);
-    return date.toLocaleString('zh-CN', {
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit'
-    });
-}
+});

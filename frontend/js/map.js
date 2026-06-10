@@ -1,337 +1,261 @@
-const MapManager = {
-    map: null,
-    canvas: null,
-    ctx: null,
-    wells: [],
-    relations: [],
-    suggestions: [],
-    selectedWell: null,
-    layerVisibility: {
-        injection: true,
-        production: true,
-        relations: true,
-        allocation: true
-    },
-    currentBlock: 'ALL',
+let map = null;
+let routeLayer = null;
+let portMarkers = null;
+let stormMarkers = null;
+let networkLayer = null;
+let heatmapLayer = null;
+let currentArrows = null;
 
-    init() {
-        this.map = L.map('map', {
-            center: CONFIG.MAP_CENTER,
-            zoom: CONFIG.MAP_ZOOM,
-            zoomControl: true,
-            attributionControl: true
-        });
+function initMap() {
+    map = L.map('map', {
+        center: [25, 40],
+        zoom: 3,
+        minZoom: 2,
+        maxZoom: 10,
+        zoomControl: true,
+        attributionControl: true,
+    });
 
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '© OpenStreetMap contributors',
-            maxZoom: 18
-        }).addTo(this.map);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
+        subdomains: 'abcd',
+        maxZoom: 19,
+    }).addTo(map);
 
-        this.canvas = document.getElementById('well-canvas');
-        this.ctx = this.canvas.getContext('2d');
+    routeLayer = L.layerGroup().addTo(map);
+    portMarkers = L.layerGroup().addTo(map);
+    stormMarkers = L.layerGroup().addTo(map);
+    networkLayer = L.layerGroup();
+    heatmapLayer = null;
+    currentArrows = L.layerGroup();
 
-        this.resizeCanvas();
-        window.addEventListener('resize', () => this.resizeCanvas());
+    addLegend();
+}
 
-        this.map.on('moveend', () => this.render());
-        this.map.on('zoomend', () => this.render());
-        this.map.on('resize', () => this.resizeCanvas());
+function addLegend() {
+    const legend = L.control({ position: 'bottomright' });
+    legend.onAdd = function () {
+        const div = L.DomUtil.create('div', 'season-legend');
+        div.innerHTML = `
+            <div class="legend-title">季节颜色</div>
+            <div class="legend-item"><div class="legend-color" style="background:#44ff88"></div>春季</div>
+            <div class="legend-item"><div class="legend-color" style="background:#ffd700"></div>夏季</div>
+            <div class="legend-item"><div class="legend-color" style="background:#ff8844"></div>秋季</div>
+            <div class="legend-item"><div class="legend-color" style="background:#4a9eff"></div>冬季</div>
+            <div class="legend-title" style="margin-top:6px">风暴标记</div>
+            <div class="legend-item" style="color:#ff4444">✕ 遇难点</div>
+        `;
+        return div;
+    };
+    legend.addTo(map);
+}
 
-        this.setupCanvasInteraction();
-
-        this.render();
-    },
-
-    resizeCanvas() {
-        const container = document.querySelector('.map-container');
-        this.canvas.width = container.clientWidth;
-        this.canvas.height = container.clientHeight;
-        this.render();
-    },
-
-    setupCanvasInteraction() {
-        const mapContainer = document.getElementById('map');
-        
-        mapContainer.addEventListener('click', (e) => {
-            const rect = this.canvas.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
-            
-            const clickedWell = this.findWellAtPosition(x, y);
-            if (clickedWell) {
-                this.selectWell(clickedWell);
-            }
-        });
-
-        mapContainer.addEventListener('mousemove', (e) => {
-            const rect = this.canvas.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
-            
-            const hoveredWell = this.findWellAtPosition(x, y);
-            this.showTooltip(hoveredWell, e.clientX, e.clientY);
-            
-            mapContainer.style.cursor = hoveredWell ? 'pointer' : 'grab';
-        });
-
-        mapContainer.addEventListener('mouseleave', () => {
-            this.hideTooltip();
-        });
-    },
-
-    findWellAtPosition(x, y) {
-        for (let i = this.wells.length - 1; i >= 0; i--) {
-            const well = this.wells[i];
-            const point = this.map.latLngToContainerPoint([well.latitude, well.longitude]);
-            
-            const dx = x - point.x;
-            const dy = y - point.y;
-            const distance = Math.sqrt(dx * dx + dy * dy);
-            
-            if (distance <= CONFIG.WELL_RADIUS + 4) {
-                return well;
-            }
-        }
-        return null;
-    },
-
-    selectWell(well) {
-        this.selectedWell = well;
-        showWellDetail(well);
-        this.render();
-    },
-
-    showTooltip(well, clientX, clientY) {
-        let tooltip = document.getElementById('well-tooltip');
-        
-        if (!well) {
-            this.hideTooltip();
-            return;
-        }
-
-        if (!tooltip) {
-            tooltip = document.createElement('div');
-            tooltip.id = 'well-tooltip';
-            tooltip.className = 'tooltip';
-            document.body.appendChild(tooltip);
-        }
-
-        let content = `<div class="tooltip-title">${well.wellName}</div>`;
-        content += `<div class="tooltip-row"><span class="tooltip-label">类型:</span><span class="tooltip-value">${well.wellType === 'INJECTION' ? '注水井' : '采油井'}</span></div>`;
-        content += `<div class="tooltip-row"><span class="tooltip-label">区块:</span><span class="tooltip-value">${well.blockName}</span></div>`;
-
-        if (well.wellType === 'INJECTION') {
-            content += `<div class="tooltip-row"><span class="tooltip-label">日注水量:</span><span class="tooltip-value">${well.latestWaterVolume?.toFixed(2) || '--'} m³</span></div>`;
-            content += `<div class="tooltip-row"><span class="tooltip-label">注水压力:</span><span class="tooltip-value">${well.latestInjectionPressure?.toFixed(2) || '--'} MPa</span></div>`;
-        } else {
-            content += `<div class="tooltip-row"><span class="tooltip-label">日产油量:</span><span class="tooltip-value">${well.latestOilVolume?.toFixed(2) || '--'} t</span></div>`;
-            content += `<div class="tooltip-row"><span class="tooltip-label">含水率:</span><span class="tooltip-value">${well.latestWaterCut?.toFixed(2) || '--'}%</span></div>`;
-        }
-
-        tooltip.innerHTML = content;
-        tooltip.style.left = (clientX + 15) + 'px';
-        tooltip.style.top = (clientY + 15) + 'px';
-        tooltip.style.display = 'block';
-    },
-
-    hideTooltip() {
-        const tooltip = document.getElementById('well-tooltip');
-        if (tooltip) {
-            tooltip.style.display = 'none';
-        }
-    },
-
-    async loadData() {
-        try {
-            const [wells, relations, suggestions] = await Promise.all([
-                API.getWells(null, this.currentBlock),
-                API.getRelations(this.currentBlock),
-                API.getLatestSuggestions()
-            ]);
-
-            this.wells = wells;
-            this.relations = relations.lines || [];
-            this.suggestions = suggestions.suggestions || [];
-
-            this.render();
-        } catch (error) {
-            console.error('Failed to load map data:', error);
-        }
-    },
-
-    setBlock(blockName) {
-        this.currentBlock = blockName;
-        this.loadData();
-    },
-
-    setLayerVisibility(layer, visible) {
-        this.layerVisibility[layer] = visible;
-        this.render();
-    },
-
-    render() {
-        if (!this.ctx || !this.map) return;
-
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-
-        if (this.layerVisibility.relations) {
-            this.renderRelations();
-        }
-
-        if (this.layerVisibility.allocation) {
-            this.renderAllocationArrows();
-        }
-
-        if (this.layerVisibility.injection) {
-            this.renderWells('INJECTION');
-        }
-
-        if (this.layerVisibility.production) {
-            this.renderWells('PRODUCTION');
-        }
-    },
-
-    renderRelations() {
-        this.ctx.lineWidth = 2;
-        this.ctx.globalAlpha = 0.6;
-
-        for (const relation of this.relations) {
-            const coords = relation.coordinates;
-            if (!coords || coords.length < 2) continue;
-
-            const start = this.map.latLngToContainerPoint([coords[0][1], coords[0][0]]);
-            const end = this.map.latLngToContainerPoint([coords[1][1], coords[1][0]]);
-
-            this.ctx.beginPath();
-            this.ctx.moveTo(start.x, start.y);
-            this.ctx.lineTo(end.x, end.y);
-            this.ctx.strokeStyle = relation.color || '#888';
-            this.ctx.stroke();
-
-            this.drawArrowHead(start, end, relation.color);
-        }
-
-        this.ctx.globalAlpha = 1;
-    },
-
-    drawArrowHead(start, end, color) {
-        const headLength = 8;
-        const angle = Math.atan2(end.y - start.y, end.x - start.x);
-
-        this.ctx.beginPath();
-        this.ctx.moveTo(end.x, end.y);
-        this.ctx.lineTo(
-            end.x - headLength * Math.cos(angle - Math.PI / 6),
-            end.y - headLength * Math.sin(angle - Math.PI / 6)
-        );
-        this.ctx.moveTo(end.x, end.y);
-        this.ctx.lineTo(
-            end.x - headLength * Math.cos(angle + Math.PI / 6),
-            end.y - headLength * Math.sin(angle + Math.PI / 6)
-        );
-        this.ctx.strokeStyle = color;
-        this.ctx.stroke();
-    },
-
-    renderWells(type) {
-        const filteredWells = this.wells.filter(w => w.wellType === type);
-
-        for (const well of filteredWells) {
-            const point = this.map.latLngToContainerPoint([well.latitude, well.longitude]);
-            
-            const isSelected = this.selectedWell && this.selectedWell.wellId === well.wellId;
-            const radius = isSelected ? CONFIG.WELL_RADIUS + 4 : CONFIG.WELL_RADIUS;
-
-            if (type === 'INJECTION') {
-                this.drawInjectionWell(point.x, point.y, radius, isSelected, well);
-            } else {
-                this.drawProductionWell(point.x, point.y, radius, isSelected, well);
-            }
-        }
-    },
-
-    drawInjectionWell(x, y, radius, isSelected, well) {
-        const gradient = this.ctx.createRadialGradient(x, y, 0, x, y, radius);
-        gradient.addColorStop(0, CONFIG.COLORS.INJECTION);
-        gradient.addColorStop(1, '#1565c0');
-
-        this.ctx.beginPath();
-        this.ctx.arc(x, y, radius, 0, Math.PI * 2);
-        this.ctx.fillStyle = gradient;
-        this.ctx.fill();
-
-        this.ctx.strokeStyle = isSelected ? '#ffeb3b' : CONFIG.COLORS.INJECTION_STROKE;
-        this.ctx.lineWidth = isSelected ? 3 : 2;
-        this.ctx.stroke();
-
-        this.ctx.fillStyle = '#fff';
-        this.ctx.font = 'bold 10px Arial';
-        this.ctx.textAlign = 'center';
-        this.ctx.textBaseline = 'middle';
-        this.ctx.fillText('注', x, y);
-    },
-
-    drawProductionWell(x, y, radius, isSelected, well) {
-        this.ctx.beginPath();
-        this.ctx.moveTo(x, y - radius);
-        this.ctx.lineTo(x - radius, y + radius * 0.8);
-        this.ctx.lineTo(x + radius, y + radius * 0.8);
-        this.ctx.closePath();
-
-        const gradient = this.ctx.createLinearGradient(x, y - radius, x, y + radius);
-        gradient.addColorStop(0, CONFIG.COLORS.PRODUCTION);
-        gradient.addColorStop(1, '#c62828');
-
-        this.ctx.fillStyle = gradient;
-        this.ctx.fill();
-
-        this.ctx.strokeStyle = isSelected ? '#ffeb3b' : CONFIG.COLORS.PRODUCTION_STROKE;
-        this.ctx.lineWidth = isSelected ? 3 : 2;
-        this.ctx.stroke();
-
-        this.ctx.fillStyle = '#fff';
-        this.ctx.font = 'bold 9px Arial';
-        this.ctx.textAlign = 'center';
-        this.ctx.textBaseline = 'middle';
-        this.ctx.fillText('采', x, y + 2);
-    },
-
-    renderAllocationArrows() {
-        for (const suggestion of this.suggestions) {
-            if (suggestion.adjustmentDirection === 'KEEP') continue;
-
-            const well = this.wells.find(w => w.wellId === suggestion.wellId);
-            if (!well) continue;
-
-            const point = this.map.latLngToContainerPoint([well.latitude, well.longitude]);
-            
-            const isIncrease = suggestion.adjustmentDirection === 'INCREASE';
-            const arrowLength = 20 + Math.min(Math.abs(suggestion.adjustmentAmount) / 2, 20);
-            const direction = isIncrease ? -1 : 1;
-
-            this.ctx.beginPath();
-            this.ctx.moveTo(point.x, point.y - CONFIG.WELL_RADIUS - 5);
-            this.ctx.lineTo(point.x, point.y - CONFIG.WELL_RADIUS - 5 - arrowLength * direction);
-            this.ctx.strokeStyle = isIncrease ? CONFIG.COLORS.ALLOCATION_INCREASE : CONFIG.COLORS.ALLOCATION_DECREASE;
-            this.ctx.lineWidth = 3;
-            this.ctx.stroke();
-
-            const arrowHeadSize = 6;
-            const arrowY = point.y - CONFIG.WELL_RADIUS - 5 - arrowLength * direction;
-            
-            this.ctx.beginPath();
-            this.ctx.moveTo(point.x, arrowY);
-            this.ctx.lineTo(point.x - arrowHeadSize, arrowY + arrowHeadSize * direction);
-            this.ctx.lineTo(point.x + arrowHeadSize, arrowY + arrowHeadSize * direction);
-            this.ctx.closePath();
-            this.ctx.fillStyle = isIncrease ? CONFIG.COLORS.ALLOCATION_INCREASE : CONFIG.COLORS.ALLOCATION_DECREASE;
-            this.ctx.fill();
-
-            this.ctx.fillStyle = isIncrease ? CONFIG.COLORS.ALLOCATION_INCREASE : CONFIG.COLORS.ALLOCATION_DECREASE;
-            this.ctx.font = 'bold 11px Arial';
-            this.ctx.textAlign = 'center';
-            const labelY = arrowY - (isIncrease ? 8 : -8);
-            this.ctx.fillText((isIncrease ? '+' : '') + suggestion.adjustmentAmount.toFixed(1), point.x, labelY);
-        }
+function getRouteColor(voyage) {
+    if (AppState.layers.network && AppState.networkData) {
+        return getNetworkColor(voyage);
     }
-};
+    return SEASON_COLORS[voyage.season] || '#ffffff';
+}
+
+function getNetworkColor(voyage) {
+    const comm = getCommunityForRoute(voyage);
+    const communityColors = [
+        '#ff6b6b', '#4ecdc4', '#45b7d1', '#f9ca24',
+        '#6c5ce7', '#a8e6cf', '#fd79a8', '#fdcb6e',
+    ];
+    return communityColors[comm % communityColors.length];
+}
+
+function getCommunityForRoute(voyage) {
+    if (!AppState.networkData) return 0;
+    const node = AppState.networkData.nodes.find(
+        n => n.port_id === voyage.departure_port_id
+    );
+    return node ? node.community_id : 0;
+}
+
+function renderPorts() {
+    portMarkers.clearLayers();
+    if (!AppState.layers.ports) return;
+
+    AppState.ports.forEach(port => {
+        const marker = L.circleMarker([port.lat, port.lon], {
+            radius: 5,
+            fillColor: '#ffd700',
+            color: '#b8960a',
+            weight: 1,
+            opacity: 0.9,
+            fillOpacity: 0.7,
+        });
+        marker.bindTooltip(`${port.name_zh || port.name}<br>${port.region || ''}`, {
+            className: 'port-tooltip',
+            direction: 'top',
+        });
+        portMarkers.addLayer(marker);
+    });
+}
+
+function renderVoyages() {
+    routeLayer.clearLayers();
+    stormMarkers.clearLayers();
+
+    if (!AppState.layers.routes && !AppState.layers.storms) return;
+
+    AppState.voyages.forEach(voyage => {
+        if (AppState.layers.routes) {
+            const color = getRouteColor(voyage);
+            let routePoints;
+
+            if (voyage.route_points && Array.isArray(voyage.route_points)) {
+                routePoints = voyage.route_points.map(p => [p[1], p[0]]);
+            } else {
+                routePoints = [
+                    [voyage.departure_lat, voyage.departure_lon],
+                    [voyage.arrival_lat, voyage.arrival_lon],
+                ];
+            }
+
+            const polyline = L.polyline(routePoints, {
+                color: color,
+                weight: 1.5,
+                opacity: 0.6,
+                smoothFactor: 1,
+            });
+
+            polyline.on('click', () => {
+                showVoyageDetail(voyage);
+            });
+
+            polyline.on('mouseover', function () {
+                this.setStyle({ weight: 3, opacity: 1 });
+            });
+            polyline.on('mouseout', function () {
+                this.setStyle({ weight: 1.5, opacity: 0.6 });
+            });
+
+            routeLayer.addLayer(polyline);
+        }
+
+        if (AppState.layers.storms && voyage.encountered_storm) {
+            let stormLat, stormLon;
+            if (voyage.route_points && Array.isArray(voyage.route_points)) {
+                const mid = Math.floor(voyage.route_points.length / 2);
+                stormLon = voyage.route_points[mid][0];
+                stormLat = voyage.route_points[mid][1];
+            } else {
+                stormLat = (voyage.departure_lat + voyage.arrival_lat) / 2;
+                stormLon = (voyage.departure_lon + voyage.arrival_lon) / 2;
+            }
+
+            const stormIcon = L.divIcon({
+                html: '<div style="color:#ff4444;font-size:16px;font-weight:bold;text-shadow:0 0 4px #ff0000">✕</div>',
+                className: 'storm-marker',
+                iconSize: [16, 16],
+                iconAnchor: [8, 8],
+            });
+
+            const marker = L.marker([stormLat, stormLon], { icon: stormIcon });
+            marker.bindTooltip(
+                `⚡ 风暴遇难<br>${voyage.departure_port} → ${voyage.arrival_port}<br>${SEASON_ZH[voyage.season] || voyage.season}`,
+                { direction: 'top' }
+            );
+            marker.on('click', () => showVoyageDetail(voyage));
+            stormMarkers.addLayer(marker);
+        }
+    });
+}
+
+function renderNetworkEdges() {
+    networkLayer.clearLayers();
+    if (!AppState.layers.network || !AppState.networkData) return;
+
+    const edges = AppState.networkData.edges;
+    const nodes = AppState.networkData.nodes;
+    const nodeMap = {};
+    nodes.forEach(n => { nodeMap[n.port_id] = n; });
+
+    const maxWeight = Math.max(...edges.map(e => e.weight), 1);
+
+    edges.forEach(edge => {
+        const src = nodeMap[edge.source];
+        const tgt = nodeMap[edge.target];
+        if (!src || !tgt) return;
+
+        const comm = src.community_id;
+        const communityColors = [
+            '#ff6b6b', '#4ecdc4', '#45b7d1', '#f9ca24',
+            '#6c5ce7', '#a8e6cf', '#fd79a8', '#fdcb6e',
+        ];
+        const color = communityColors[comm % communityColors.length];
+        const weight = 1 + (edge.weight / maxWeight) * 5;
+
+        const line = L.polyline([[src.lat, src.lon], [tgt.lat, tgt.lon]], {
+            color: color,
+            weight: weight,
+            opacity: 0.5,
+            dashArray: '4 4',
+        });
+        networkLayer.addLayer(line);
+    });
+
+    nodes.forEach(node => {
+        const radius = 3 + node.betweenness_centrality * 50;
+        const marker = L.circleMarker([node.lat, node.lon], {
+            radius: Math.min(radius, 15),
+            fillColor: node.is_hub ? '#ffd700' : '#4a9eff',
+            color: node.is_hub ? '#b8960a' : '#2a6ecf',
+            weight: node.is_hub ? 2 : 1,
+            opacity: 0.9,
+            fillOpacity: 0.7,
+        });
+        marker.bindTooltip(
+            `${node.port_name_zh || node.port_name}<br>中介中心性: ${node.betweenness_centrality.toFixed(4)}<br>贸易流量: ${node.trade_flow.toFixed(1)}`,
+            { direction: 'top' }
+        );
+        networkLayer.addLayer(marker);
+    });
+
+    networkLayer.addTo(map);
+}
+
+function renderMapLayers() {
+    renderPorts();
+    renderVoyages();
+    renderNetworkEdges();
+
+    if (AppState.layers.network) {
+        networkLayer.addTo(map);
+    } else {
+        map.removeLayer(networkLayer);
+    }
+
+    if (AppState.layers.currents) {
+        currentArrows.addTo(map);
+    } else {
+        map.removeLayer(currentArrows);
+    }
+}
+
+function renderCommunityColors() {
+    if (!AppState.networkData) return;
+    renderVoyages();
+    document.getElementById('network-info').innerHTML =
+        AppState.networkData.nodes
+            ? `<p>识别出 ${new Set(AppState.networkData.nodes.map(n => n.community_id)).size} 个贸易社区</p>` +
+              AppState.networkData.nodes
+                  .sort((a, b) => a.community_id - b.community_id)
+                  .map(n => `<div class="hub-item" style="border-left-color:${
+                      ['#ff6b6b','#4ecdc4','#45b7d1','#f9ca24','#6c5ce7','#a8e6cf','#fd79a8','#fdcb6e'][n.community_id % 8]
+                  }">社区${n.community_id}: ${n.port_name_zh || n.port_name}</div>`)
+                  .join('')
+            : '';
+}
+
+function renderHubPorts() {
+    if (!AppState.networkData) return;
+    const hubs = AppState.networkData.nodes.filter(n => n.is_hub)
+        .sort((a, b) => b.betweenness_centrality - a.betweenness_centrality);
+    document.getElementById('network-info').innerHTML =
+        `<p>核心枢纽港: ${hubs.length} 个</p>` +
+        hubs.map(n => `<div class="hub-item">⭐ ${n.port_name_zh || n.port_name} (BC: ${n.betweenness_centrality.toFixed(4)})</div>`).join('');
+}

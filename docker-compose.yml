@@ -1,0 +1,58 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgis/postgis:15-3.3
+    environment:
+      POSTGRES_DB: ancient_maritime
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/ancient_maritime
+      RUST_LOG: ancient_maritime_backend=debug
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./frontend:/app/frontend
+
+  data-loader:
+    image: python:3.11-slim
+    working_dir: /scripts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ancient_maritime
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    volumes:
+      - ./scripts:/scripts
+    command: >
+      bash -c "
+        pip install psycopg2-binary &&
+        python simulate_voyages.py &&
+        python simulate_climate.py
+      "
+
+volumes:
+  pgdata:
