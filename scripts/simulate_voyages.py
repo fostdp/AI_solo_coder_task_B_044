@@ -1,6 +1,10 @@
 import json
 import random
 import math
+import argparse
+import os
+import sys
+
 try:
     import psycopg2
     from psycopg2.extras import execute_values
@@ -102,8 +106,6 @@ PORT_ALIASES = [
     (37, "Venezia", "威尼斯(意)", 800, 1800, "Italian", "Venetian records"),
 ]
 
-STORM_PRONE_SEASONS = {"autumn": 0.25, "winter": 0.30, "spring": 0.12, "summer": 0.08}
-
 REGION_CONNECTIONS = {
     "Mediterranean": ["Mediterranean", "Atlantic", "Red Sea", "Indian Ocean"],
     "Atlantic": ["Mediterranean", "Atlantic"],
@@ -111,6 +113,15 @@ REGION_CONNECTIONS = {
     "Indian Ocean": ["Red Sea", "Indian Ocean", "East Asia"],
     "East Asia": ["Indian Ocean", "East Asia"],
 }
+
+REGION_WEIGHTS = {
+    "Mediterranean": 0.35,
+    "Indian Ocean": 0.30,
+    "East Asia": 0.20,
+    "Red Sea": 0.08,
+    "Atlantic": 0.07,
+}
+
 
 def generate_route_points(lat1, lon1, lat2, lon2, num_points=8):
     points = []
@@ -126,21 +137,33 @@ def generate_route_points(lat1, lon1, lat2, lon2, num_points=8):
         points.append([round(lon, 4), round(lat, 4)])
     return points
 
-def get_connected_ports(port, all_ports):
+
+def get_connected_ports(port, all_ports, allowed_regions=None):
     port_region = port[3]
     connected_regions = REGION_CONNECTIONS.get(port_region, [port_region])
+    if allowed_regions:
+        connected_regions = [r for r in connected_regions if r in allowed_regions]
     connected = [p for p in all_ports if p[3] in connected_regions and p[0] != port[0]]
     return connected
 
-def determine_storm(season, region, year):
-    base_prob = STORM_PRONE_SEASONS.get(season, 0.10)
+
+def determine_storm(season, region, year, storm_multiplier=1.0):
+    base_storm_prone = {
+        "autumn": 0.25 * storm_multiplier,
+        "winter": 0.30 * storm_multiplier,
+        "spring": 0.12 * storm_multiplier,
+        "summer": 0.08 * storm_multiplier,
+    }
+    base_prob = base_storm_prone.get(season, 0.10 * storm_multiplier)
     if region in ["Atlantic"]:
         base_prob *= 1.3
     if year < 0:
         base_prob *= 0.9
     if 1300 <= year <= 1800:
         base_prob *= 1.15
+    base_prob = max(0.01, min(0.85, base_prob))
     return random.random() < base_prob
+
 
 def pick_ship_and_cargo(year, region):
     if year < 0:
@@ -175,18 +198,74 @@ def pick_ship_and_cargo(year, region):
     cargo = random.choice(cargo_pool + CARGO_TYPES[:5])
     return ship, cargo
 
-def generate_voyages(num_records=1500):
+
+def get_active_ports(year, port_list):
+    active = []
+    for p in port_list:
+        if 29 <= p[0] <= 32:
+            if year >= -300:
+                active.append(p)
+        elif p[0] in [35, 36, 39, 40]:
+            if year >= 800:
+                active.append(p)
+        elif p[0] in [37, 38]:
+            if year >= 500:
+                active.append(p)
+        elif p[0] == 34:
+            if year >= 1500:
+                active.append(p)
+        else:
+            active.append(p)
+    return active
+
+
+def filter_ports_by_region(ports, allowed_regions):
+    if not allowed_regions:
+        return ports
+    return [p for p in ports if p[3] in allowed_regions]
+
+
+def pick_port_by_region_weight(ports):
+    region_ports = {}
+    for p in ports:
+        region_ports.setdefault(p[3], []).append(p)
+    regions = list(region_ports.keys())
+    weights = [REGION_WEIGHTS.get(r, 0.1) for r in regions]
+    total_w = sum(weights)
+    weights = [w / total_w for w in weights]
+    chosen_region = random.choices(regions, weights=weights, k=1)[0]
+    return random.choice(region_ports[chosen_region])
+
+
+def generate_voyages(num_records, year_start=-1000, year_end=1800,
+                     allowed_regions=None, allowed_ports=None,
+                     storm_multiplier=1.0, seed=42):
+    random.seed(seed)
     voyages = []
-    for _ in range(num_records):
-        port = random.choice(PORTS)
-        connected = get_connected_ports(port, PORTS)
+    port_pool = list(PORTS)
+
+    if allowed_ports:
+        port_pool = [p for p in port_pool if p[0] in allowed_ports or p[1] in allowed_ports]
+    if allowed_regions:
+        port_pool = filter_ports_by_region(port_pool, allowed_regions)
+    if not port_pool:
+        port_pool = list(PORTS)
+
+    while len(voyages) < num_records:
+        port = pick_port_by_region_weight(port_pool)
+        connected = get_connected_ports(port, port_pool, allowed_regions)
         if not connected:
             continue
         dest = random.choice(connected)
-        year = random.randint(-1000, 1800)
+
+        year = random.randint(year_start, year_end)
+        active = get_active_ports(year, port_pool)
+        if port not in active or dest not in active:
+            continue
+
         season = random.choice(SEASONS)
         ship, cargo = pick_ship_and_cargo(year, port[3])
-        storm = determine_storm(season, port[3], year)
+        storm = determine_storm(season, port[3], year, storm_multiplier)
         route = generate_route_points(port[4], port[5], dest[4], dest[5])
         voyages.append({
             "departure_port_id": port[0],
@@ -204,6 +283,7 @@ def generate_voyages(num_records=1500):
         })
     return voyages
 
+
 def insert_ports(cur):
     sql = "INSERT INTO ports (id, name, name_zh, region, geom) VALUES %s"
     values = []
@@ -211,6 +291,7 @@ def insert_ports(cur):
         geom = f"SRID=4326;POINT({p[5]} {p[4]})"
         values.append((p[0], p[1], p[2], p[3], geom))
     execute_values(cur, sql, values)
+
 
 def insert_port_aliases(cur):
     sql = """INSERT INTO port_aliases
@@ -220,6 +301,7 @@ def insert_port_aliases(cur):
     for a in PORT_ALIASES:
         values.append((a[0], a[1], a[2], a[3], a[4], a[5], a[6]))
     execute_values(cur, sql, values)
+
 
 def insert_voyages(cur, voyages):
     sql = """INSERT INTO voyage_records
@@ -237,12 +319,13 @@ def insert_voyages(cur, voyages):
         ))
     execute_values(cur, sql, values)
 
+
 def export_voyages_json(voyages, filepath):
     ports_dict = {p[0]: {"name": p[1], "name_zh": p[2], "lat": p[4], "lon": p[5]} for p in PORTS}
     export_data = []
-    for v in voyages:
+    for i, v in enumerate(voyages):
         export_data.append({
-            "id": voyages.index(v) + 1,
+            "id": i + 1,
             "departure_port": v["departure_name"],
             "departure_port_zh": ports_dict[v["departure_port_id"]]["name_zh"],
             "arrival_port": v["arrival_name"],
@@ -257,6 +340,7 @@ def export_voyages_json(voyages, filepath):
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(export_data, f, ensure_ascii=False, indent=2)
 
+
 def export_ports_json(filepath):
     data = []
     for p in PORTS:
@@ -267,36 +351,185 @@ def export_ports_json(filepath):
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Ancient Maritime Voyage Data Simulator",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # 生成默认1500条全年代记录
+  python simulate_voyages.py
+
+  # 生成3000条中世纪(500-1500)东地中海+红海高风暴记录
+  python simulate_voyages.py -n 3000 --year-start 500 --year-end 1500 \\
+      --regions Mediterranean,Red_Sea --storm-multiplier 1.5
+
+  # 仅生成泉州出发的200条宋元时代记录
+  python simulate_voyages.py -n 200 --year-start 960 --year-end 1368 \\
+      --ports Quanzhou --seed 123
+
+  # 导出到指定目录并写入数据库
+  python simulate_voyages.py --outdir /data --db
+        """
+    )
+    parser.add_argument("-n", "--num-records", type=int, default=1500,
+                        help="Number of voyage records to generate (default: 1500)")
+    parser.add_argument("--year-start", type=int, default=-1000,
+                        help="Start year (default: -1000, negative=BC)")
+    parser.add_argument("--year-end", type=int, default=1800,
+                        help="End year (default: 1800)")
+    parser.add_argument("--regions", type=str, default=None,
+                        help="Comma-separated allowed regions: Mediterranean,Indian_Ocean,East_Asia,Red_Sea,Atlantic")
+    parser.add_argument("--ports", type=str, default=None,
+                        help="Comma-separated allowed port IDs or names (e.g. 21,22 or Quanzhou,Guangzhou)")
+    parser.add_argument("--storm-multiplier", type=float, default=1.0,
+                        help="Storm probability multiplier (default: 1.0)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducibility (default: 42)")
+    parser.add_argument("--outdir", type=str, default=None,
+                        help="Output directory for JSON files (default: scripts/)")
+    parser.add_argument("--db", action="store_true",
+                        help="Insert into PostgreSQL database (requires psycopg2)")
+    parser.add_argument("--db-host", type=str, default=None,
+                        help="Database host (default: from PGHOST env or localhost)")
+    parser.add_argument("--db-port", type=int, default=None,
+                        help="Database port (default: from PGPORT env or 5432)")
+    parser.add_argument("--db-name", type=str, default=None,
+                        help="Database name (default: from PGDATABASE env or ancient_maritime)")
+    parser.add_argument("--db-user", type=str, default=None,
+                        help="Database user (default: from PGUSER env or postgres)")
+    parser.add_argument("--db-password", type=str, default=None,
+                        help="Database password (default: from PGPASSWORD env or postgres)")
+    return parser.parse_args()
+
+
+def resolve_ports_arg(ports_str):
+    if not ports_str:
+        return None
+    result_ids = []
+    result_names = []
+    port_name_to_id = {p[1]: p[0] for p in PORTS}
+    for token in ports_str.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if token.isdigit():
+            result_ids.append(int(token))
+        elif token in port_name_to_id:
+            result_ids.append(port_name_to_id[token])
+        else:
+            result_names.append(token)
+    return result_ids + result_names
+
+
+def resolve_regions_arg(regions_str):
+    if not regions_str:
+        return None
+    region_map = {
+        "Mediterranean": "Mediterranean",
+        "mediterranean": "Mediterranean",
+        "Indian_Ocean": "Indian Ocean",
+        "indian_ocean": "Indian Ocean",
+        "Indian": "Indian Ocean",
+        "East_Asia": "East Asia",
+        "east_asia": "East Asia",
+        "EastAsia": "East Asia",
+        "Red_Sea": "Red Sea",
+        "red_sea": "Red Sea",
+        "RedSea": "Red Sea",
+        "Atlantic": "Atlantic",
+        "atlantic": "Atlantic",
+    }
+    return [region_map.get(r.strip(), r.strip()) for r in regions_str.split(",") if r.strip()]
+
+
 def main():
-    random.seed(42)
-    voyages = generate_voyages(1500)
+    args = parse_args()
 
-    export_ports_json("scripts/ports.json")
-    export_voyages_json(voyages, "scripts/voyages.json")
+    if args.year_start > args.year_end:
+        print("ERROR: --year-start must be <= --year-end", file=sys.stderr)
+        sys.exit(1)
+    if args.num_records <= 0:
+        print("ERROR: --num-records must be positive", file=sys.stderr)
+        sys.exit(1)
+    if args.storm_multiplier <= 0:
+        print("ERROR: --storm-multiplier must be positive", file=sys.stderr)
+        sys.exit(1)
 
-    if HAS_PG:
+    allowed_regions = resolve_regions_arg(args.regions)
+    allowed_ports = resolve_ports_arg(args.ports)
+
+    print(f"Generating {args.num_records} voyage records")
+    print(f"  Years: {args.year_start} to {args.year_end}")
+    if allowed_regions:
+        print(f"  Regions: {', '.join(allowed_regions)}")
+    if allowed_ports:
+        print(f"  Ports: {', '.join(str(p) for p in allowed_ports)}")
+    print(f"  Storm multiplier: {args.storm_multiplier}x")
+    print(f"  Random seed: {args.seed}")
+
+    voyages = generate_voyages(
+        args.num_records,
+        year_start=args.year_start,
+        year_end=args.year_end,
+        allowed_regions=allowed_regions,
+        allowed_ports=allowed_ports,
+        storm_multiplier=args.storm_multiplier,
+        seed=args.seed,
+    )
+
+    outdir = args.outdir or os.path.join(os.path.dirname(os.path.abspath(__file__)))
+    os.makedirs(outdir, exist_ok=True)
+
+    export_ports_json(os.path.join(outdir, "ports.json"))
+    export_voyages_json(voyages, os.path.join(outdir, "voyages.json"))
+    print(f"JSON exported to {outdir}/")
+
+    if args.db:
+        if not HAS_PG:
+            print("ERROR: psycopg2 not installed. Cannot write to database.", file=sys.stderr)
+            sys.exit(2)
         try:
+            host = args.db_host or os.environ.get("PGHOST", "localhost")
+            port = args.db_port or int(os.environ.get("PGPORT", "5432"))
+            dbname = args.db_name or os.environ.get("PGDATABASE", "ancient_maritime")
+            user = args.db_user or os.environ.get("PGUSER", "postgres")
+            password = args.db_password or os.environ.get("PGPASSWORD", "postgres")
+
             conn = psycopg2.connect(
-                host="localhost", port=5432, dbname="ancient_maritime",
-                user="postgres", password="postgres"
+                host=host, port=port, dbname=dbname, user=user, password=password
             )
             cur = conn.cursor()
+
+            cur.execute("TRUNCATE TABLE voyage_records, port_aliases, ports RESTART IDENTITY CASCADE")
             insert_ports(cur)
+            print(f"  Inserted {len(PORTS)} ports")
             insert_port_aliases(cur)
+            print(f"  Inserted {len(PORT_ALIASES)} port aliases")
             insert_voyages(cur, voyages)
             conn.commit()
             cur.close()
             conn.close()
             print(f"Successfully inserted {len(voyages)} voyage records into database.")
         except Exception as e:
-            print(f"Database connection failed: {e}")
-            print("Data exported to JSON files only.")
-    else:
-        print("psycopg2 not installed. Data exported to JSON files only.")
+            print(f"Database error: {e}", file=sys.stderr)
+            sys.exit(3)
 
     storm_count = sum(1 for v in voyages if v["encountered_storm"])
     print(f"Total voyages: {len(voyages)}")
     print(f"Storm encounters: {storm_count} ({storm_count/len(voyages)*100:.1f}%)")
+    by_region = {}
+    for v in voyages:
+        port = next(p for p in PORTS if p[0] == v["departure_port_id"])
+        by_region.setdefault(port[3], [0, 0])
+        by_region[port[3]][0] += 1
+        if v["encountered_storm"]:
+            by_region[port[3]][1] += 1
+    print("By region:")
+    for r, (n, s) in sorted(by_region.items()):
+        print(f"  {r}: {n} voyages, {s} storms ({s/n*100:.1f}%)")
+
 
 if __name__ == "__main__":
     main()

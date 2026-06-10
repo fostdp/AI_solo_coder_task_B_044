@@ -1,4 +1,47 @@
-const API_BASE = '/api';
+const API_SERVICES = (function () {
+    if (typeof window.__API_GATEWAY__ === 'string' && window.__API_GATEWAY__) {
+        return {
+            voyage_loader: window.__API_GATEWAY__,
+            network_analyzer: window.__API_GATEWAY__,
+            storm_risk_modeler: window.__API_GATEWAY__,
+        };
+    }
+    const host = location.hostname || 'localhost';
+    const samePort = location.port === '3001' || !location.port;
+    if (samePort) {
+        const base = `${location.protocol}//${host}${location.port ? ':' + location.port : ':3001'}`;
+        return {
+            voyage_loader: base,
+            network_analyzer: window.__NETWORK_ANALYZER_URL__ || `http://${host}:3002`,
+            storm_risk_modeler: window.__STORM_RISK_URL__ || `http://${host}:3003`,
+        };
+    }
+    return {
+        voyage_loader: window.__VOYAGE_LOADER_URL__ || `http://${host}:3001`,
+        network_analyzer: window.__NETWORK_ANALYZER_URL__ || `http://${host}:3002`,
+        storm_risk_modeler: window.__STORM_RISK_URL__ || `http://${host}:3003`,
+    };
+})();
+
+const API_ROUTE_MAP = {
+    '/ports': 'voyage_loader',
+    '/voyages': 'voyage_loader',
+    '/stats': 'voyage_loader',
+    '/climate/periods': 'voyage_loader',
+    '/climate/currents': 'voyage_loader',
+    '/climate/winds': 'voyage_loader',
+    '/network': 'network_analyzer',
+    '/storm-risk': 'storm_risk_modeler',
+};
+
+function resolveApiEndpoint(endpoint) {
+    for (const [prefix, service] of Object.entries(API_ROUTE_MAP)) {
+        if (endpoint.startsWith(prefix)) {
+            return API_SERVICES[service] + '/api' + endpoint;
+        }
+    }
+    return API_SERVICES.voyage_loader + '/api' + endpoint;
+}
 
 const AppState = {
     yearStart: -1000,
@@ -85,14 +128,14 @@ const CARGO_ZH = {
 };
 
 async function apiFetch(endpoint, params = {}) {
-    const url = new URL(API_BASE + endpoint, window.location.origin);
+    const url = new URL(resolveApiEndpoint(endpoint));
     Object.entries(params).forEach(([k, v]) => {
         if (v !== '' && v !== null && v !== undefined) {
             url.searchParams.set(k, v);
         }
     });
     const resp = await fetch(url.toString());
-    if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+    if (!resp.ok) throw new Error(`API error: ${resp.status} ${url}`);
     return resp.json();
 }
 

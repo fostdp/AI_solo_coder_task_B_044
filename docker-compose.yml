@@ -7,6 +7,21 @@ services:
       POSTGRES_DB: ancient_maritime
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      PGDATA: /var/lib/postgresql/data/pgdata
+    command: >
+      -c work_mem=64MB
+      -c maintenance_work_mem=256MB
+      -c shared_buffers=512MB
+      -c effective_cache_size=2GB
+      -c random_page_cost=1.1
+      -c cpu_tuple_cost=0.005
+      -c min_parallel_table_scan_size=8MB
+      -c max_parallel_workers_per_gather=4
+      -c effective_io_concurrency=200
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c max_wal_size=2GB
     ports:
       - "5432:5432"
     volumes:
@@ -27,15 +42,17 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/ancient_maritime
       CONFIG_PATH: /app/config.toml
-      RUST_LOG: voyage_loader=debug
+      RUST_LOG: voyage_loader=info,tower_http=info,axum=info,sqlx=warn
     ports:
       - "3001:3001"
+      - "4001:4001"
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
       - ./backend/config.toml:/app/config.toml
       - ./frontend:/app/frontend
+    restart: unless-stopped
 
   network-analyzer:
     build:
@@ -46,14 +63,16 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/ancient_maritime
       CONFIG_PATH: /app/config.toml
-      RUST_LOG: network_analyzer=debug
+      RUST_LOG: network_analyzer=info,tower_http=info,axum=info,sqlx=warn
     ports:
       - "3002:3002"
+      - "4002:4002"
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
       - ./backend/config.toml:/app/config.toml
+    restart: unless-stopped
 
   storm-risk-modeler:
     build:
@@ -64,14 +83,16 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/ancient_maritime
       CONFIG_PATH: /app/config.toml
-      RUST_LOG: storm_risk_modeler=debug
+      RUST_LOG: storm_risk_modeler=info,tower_http=info,axum=info,sqlx=warn
     ports:
       - "3003:3003"
+      - "4003:4003"
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
       - ./backend/config.toml:/app/config.toml
+    restart: unless-stopped
 
   data-loader:
     image: python:3.11-slim
@@ -90,9 +111,41 @@ services:
     command: >
       bash -c "
         pip install psycopg2-binary &&
-        python simulate_voyages.py &&
-        python simulate_climate.py
+        python simulate_voyages.py --db &&
+        python simulate_climate.py --db
       "
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
 
 volumes:
   pgdata:
+  prometheus_data:
+  grafana_data:

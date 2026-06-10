@@ -1,5 +1,14 @@
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+SET work_mem = '64MB';
+SET maintenance_work_mem = '256MB';
+SET effective_cache_size = '2GB';
+SET shared_buffers = '512MB';
+SET random_page_cost = 1.1;
+SET cpu_tuple_cost = 0.005;
+SET min_parallel_table_scan_size = '8MB';
 
 CREATE TABLE IF NOT EXISTS ports (
     id SERIAL PRIMARY KEY,
@@ -33,7 +42,8 @@ CREATE TABLE IF NOT EXISTS climate_periods (
     avg_rainfall NUMERIC(6,2),
     storm_frequency NUMERIC(5,4),
     nao_index NUMERIC(5,2),
-    description TEXT
+    description TEXT,
+    CONSTRAINT chk_period_range CHECK (period_start <= period_end)
 );
 
 CREATE TABLE IF NOT EXISTS ocean_currents (
@@ -95,20 +105,52 @@ CREATE TABLE IF NOT EXISTS storm_risk_results (
     computed_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_ports_geom ON ports USING GIST(geom);
-CREATE INDEX idx_voyage_route_geom ON voyage_records USING GIST(route_geom);
+CREATE INDEX idx_ports_geom ON ports USING GIST(geom) WITH (fillfactor = 90);
+CREATE INDEX idx_ports_region ON ports(region);
+CREATE INDEX idx_ports_name_trgm ON ports USING GIN (name gin_trgm_ops);
+CREATE INDEX idx_ports_name_zh_trgm ON ports USING GIN (name_zh gin_trgm_ops);
+
+CREATE INDEX idx_voyage_route_geom ON voyage_records USING GIST(route_geom) WITH (fillfactor = 90);
 CREATE INDEX idx_voyage_departure ON voyage_records(departure_port_id);
 CREATE INDEX idx_voyage_arrival ON voyage_records(arrival_port_id);
 CREATE INDEX idx_voyage_year ON voyage_records(voyage_year);
 CREATE INDEX idx_voyage_season ON voyage_records(season);
 CREATE INDEX idx_voyage_cargo ON voyage_records(cargo_type);
 CREATE INDEX idx_voyage_storm ON voyage_records(encountered_storm);
+CREATE INDEX idx_voyage_year_season ON voyage_records(voyage_year, season);
+CREATE INDEX idx_voyage_route_year ON voyage_records(departure_port_id, arrival_port_id, voyage_year);
+
 CREATE INDEX idx_climate_period_range ON climate_periods(period_start, period_end);
-CREATE INDEX idx_current_geom ON ocean_currents USING GIST(geom);
-CREATE INDEX idx_wind_geom ON wind_fields USING GIST(geom);
+CREATE INDEX idx_climate_storm ON climate_periods(storm_frequency);
+
+CREATE INDEX idx_current_geom ON ocean_currents USING GIST(geom) WITH (fillfactor = 90);
+CREATE INDEX idx_current_period_season ON ocean_currents(period_id, season);
+CREATE INDEX idx_current_name ON ocean_currents(name);
+
+CREATE INDEX idx_wind_geom ON wind_fields USING GIST(geom) WITH (fillfactor = 90);
+CREATE INDEX idx_wind_period_season ON wind_fields(period_id, season);
+CREATE INDEX idx_wind_region ON wind_fields(region);
+
 CREATE INDEX idx_network_port ON network_analysis_results(port_id);
 CREATE INDEX idx_network_period ON network_analysis_results(period_start, period_end);
+CREATE INDEX idx_network_community ON network_analysis_results(community_id);
+CREATE INDEX idx_network_hub ON network_analysis_results(is_hub);
+
 CREATE INDEX idx_storm_risk_route ON storm_risk_results(departure_port_id, arrival_port_id);
+CREATE INDEX idx_storm_risk_model ON storm_risk_results(model_type);
+CREATE INDEX idx_storm_risk_score ON storm_risk_results(risk_score);
+
 CREATE INDEX idx_port_aliases_name ON port_aliases(alias_name);
+CREATE INDEX idx_port_aliases_name_trgm ON port_aliases USING GIN (alias_name gin_trgm_ops);
 CREATE INDEX idx_port_aliases_name_zh ON port_aliases(alias_name_zh);
 CREATE INDEX idx_port_aliases_port ON port_aliases(port_id);
+CREATE INDEX idx_port_aliases_period ON port_aliases(port_id, period_start, period_end);
+
+ANALYZE ports;
+ANALYZE voyage_records;
+ANALYZE climate_periods;
+ANALYZE ocean_currents;
+ANALYZE wind_fields;
+ANALYZE port_aliases;
+ANALYZE network_analysis_results;
+ANALYZE storm_risk_results;
