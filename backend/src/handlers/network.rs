@@ -6,7 +6,7 @@ use serde::Deserialize;
 use sqlx::PgPool;
 
 use crate::analysis::network::TradeNetwork;
-use crate::models::{NetworkAnalysisResponse, NetworkQuery, Port, VoyageRecord};
+use crate::models::{NetworkAnalysisResponse, NetworkQuery, Port, PortAlias, PortNameIndex, VoyageRecord};
 
 pub async fn get_network_analysis(
     State(pool): State<PgPool>,
@@ -34,7 +34,18 @@ pub async fn get_network_analysis(
     .await
     .unwrap_or_default();
 
-    let network = TradeNetwork::from_voyages(&voyages, &ports);
+    let aliases = sqlx::query_as!(
+        PortAlias,
+        "SELECT id, port_id, alias_name, alias_name_zh, period_start, period_end, language, source \
+         FROM port_aliases"
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    let name_index = PortNameIndex::build(&ports, &aliases);
+
+    let network = TradeNetwork::from_voyages_with_index(&voyages, &ports, &name_index);
     let (nodes, edges) = network.analyze(year_start, year_end);
 
     Json(NetworkAnalysisResponse {

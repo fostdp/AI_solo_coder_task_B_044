@@ -101,68 +101,158 @@ function renderVoyages() {
 
     if (!AppState.layers.routes && !AppState.layers.storms) return;
 
-    AppState.voyages.forEach(voyage => {
-        if (AppState.layers.routes) {
-            const color = getRouteColor(voyage);
-            let routePoints;
+    if (AppState.layers.routes) {
+        const aggregated = aggregateVoyages(AppState.voyages);
+        const maxCount = Math.max(...aggregated.map(g => g.count), 1);
 
-            if (voyage.route_points && Array.isArray(voyage.route_points)) {
-                routePoints = voyage.route_points.map(p => [p[1], p[0]]);
+        aggregated.forEach(group => {
+            const color = getRouteColor(group.representative);
+            const baseWeight = 0.8;
+            const weightBonus = Math.log2(group.count + 1) * 0.6;
+            const opacity = Math.min(0.85, 0.15 + (group.count / maxCount) * 0.7);
+
+            let routePoints;
+            if (group.representative.route_points && Array.isArray(group.representative.route_points)) {
+                routePoints = group.representative.route_points.map(p => [p[1], p[0]]);
             } else {
                 routePoints = [
-                    [voyage.departure_lat, voyage.departure_lon],
-                    [voyage.arrival_lat, voyage.arrival_lon],
+                    [group.representative.departure_lat, group.representative.departure_lon],
+                    [group.representative.arrival_lat, group.representative.arrival_lon],
                 ];
             }
 
             const polyline = L.polyline(routePoints, {
                 color: color,
-                weight: 1.5,
-                opacity: 0.6,
-                smoothFactor: 1,
+                weight: baseWeight + weightBonus,
+                opacity: opacity,
+                smoothFactor: 1.5,
             });
 
             polyline.on('click', () => {
-                showVoyageDetail(voyage);
+                showVoyageDetail(group.representative);
             });
 
             polyline.on('mouseover', function () {
-                this.setStyle({ weight: 3, opacity: 1 });
+                this.setStyle({ weight: baseWeight + weightBonus + 2, opacity: 1 });
             });
             polyline.on('mouseout', function () {
-                this.setStyle({ weight: 1.5, opacity: 0.6 });
+                this.setStyle({ weight: baseWeight + weightBonus, opacity: opacity });
             });
 
-            routeLayer.addLayer(polyline);
-        }
-
-        if (AppState.layers.storms && voyage.encountered_storm) {
-            let stormLat, stormLon;
-            if (voyage.route_points && Array.isArray(voyage.route_points)) {
-                const mid = Math.floor(voyage.route_points.length / 2);
-                stormLon = voyage.route_points[mid][0];
-                stormLat = voyage.route_points[mid][1];
-            } else {
-                stormLat = (voyage.departure_lat + voyage.arrival_lat) / 2;
-                stormLon = (voyage.departure_lon + voyage.arrival_lon) / 2;
+            if (group.count > 1) {
+                polyline.bindTooltip(
+                    `${group.representative.departure_port_zh || group.representative.departure_port} → ${group.representative.arrival_port_zh || group.representative.arrival_port}<br>航线数: ${group.count}`,
+                    { direction: 'top', sticky: true }
+                );
             }
 
-            const stormIcon = L.divIcon({
-                html: '<div style="color:#ff4444;font-size:16px;font-weight:bold;text-shadow:0 0 4px #ff0000">✕</div>',
-                className: 'storm-marker',
-                iconSize: [16, 16],
-                iconAnchor: [8, 8],
-            });
+            routeLayer.addLayer(polyline);
+        });
+    }
 
-            const marker = L.marker([stormLat, stormLon], { icon: stormIcon });
-            marker.bindTooltip(
-                `⚡ 风暴遇难<br>${voyage.departure_port} → ${voyage.arrival_port}<br>${SEASON_ZH[voyage.season] || voyage.season}`,
-                { direction: 'top' }
-            );
-            marker.on('click', () => showVoyageDetail(voyage));
-            stormMarkers.addLayer(marker);
+    if (AppState.layers.storms) {
+        const stormVoyages = AppState.voyages.filter(v => v.encountered_storm);
+        const stormClusters = clusterStormMarkers(stormVoyages);
+
+        stormClusters.forEach(cluster => {
+            if (cluster.count === 1) {
+                const v = cluster.voyages[0];
+                const stormIcon = L.divIcon({
+                    html: '<div style="color:#ff4444;font-size:16px;font-weight:bold;text-shadow:0 0 4px #ff0000">✕</div>',
+                    className: 'storm-marker',
+                    iconSize: [16, 16],
+                    iconAnchor: [8, 8],
+                });
+                const marker = L.marker([cluster.lat, cluster.lon], { icon: stormIcon });
+                marker.bindTooltip(
+                    `⚡ 风暴遇难<br>${v.departure_port} → ${v.arrival_port}<br>${SEASON_ZH[v.season] || v.season}`,
+                    { direction: 'top' }
+                );
+                marker.on('click', () => showVoyageDetail(v));
+                stormMarkers.addLayer(marker);
+            } else {
+                const size = Math.min(12 + cluster.count * 2, 36);
+                const stormIcon = L.divIcon({
+                    html: `<div style="color:#ff4444;font-size:${size}px;font-weight:bold;text-shadow:0 0 6px #ff0000;line-height:1;text-align:center">✕<span style="font-size:${Math.max(9, size/2)}px;display:block">${cluster.count}</span></div>`,
+                    className: 'storm-marker',
+                    iconSize: [size, size + 10],
+                    iconAnchor: [size/2, size/2],
+                });
+                const marker = L.marker([cluster.lat, cluster.lon], { icon: stormIcon });
+                marker.bindTooltip(
+                    `⚡ 风暴遇难 ×${cluster.count}<br>${cluster.voyages.slice(0, 3).map(v => `${v.departure_port}→${v.arrival_port}`).join('<br>')}${cluster.count > 3 ? '<br>...' : ''}`,
+                    { direction: 'top' }
+                );
+                marker.on('click', () => showVoyageDetail(cluster.voyages[0]));
+                stormMarkers.addLayer(marker);
+            }
+        });
+    }
+}
+
+function aggregateVoyages(voyages) {
+    const groups = {};
+
+    voyages.forEach(voyage => {
+        const depId = voyage.departure_port_id || voyage.departure_port;
+        const arrId = voyage.arrival_port_id || voyage.arrival_port;
+        const season = voyage.season;
+        const key = `${depId}-${arrId}-${season}`;
+
+        if (!groups[key]) {
+            groups[key] = {
+                key,
+                representative: voyage,
+                count: 0,
+                voyages: [],
+            };
         }
+        groups[key].count++;
+        groups[key].voyages.push(voyage);
     });
+
+    return Object.values(groups);
+}
+
+function clusterStormMarkers(stormVoyages) {
+    const clusters = [];
+    const gridSize = 2.0;
+    const gridMap = {};
+
+    stormVoyages.forEach(v => {
+        let sLat, sLon;
+        if (v.route_points && Array.isArray(v.route_points)) {
+            const mid = Math.floor(v.route_points.length / 2);
+            sLon = v.route_points[mid][0];
+            sLat = v.route_points[mid][1];
+        } else {
+            sLat = (v.departure_lat + v.arrival_lat) / 2;
+            sLon = (v.departure_lon + v.arrival_lon) / 2;
+        }
+
+        const cellKey = `${Math.floor(sLat / gridSize)}-${Math.floor(sLon / gridSize)}`;
+
+        if (!gridMap[cellKey]) {
+            gridMap[cellKey] = {
+                lat: 0, lon: 0, count: 0, voyages: []
+            };
+        }
+        gridMap[cellKey].lat += sLat;
+        gridMap[cellKey].lon += sLon;
+        gridMap[cellKey].count++;
+        gridMap[cellKey].voyages.push(v);
+    });
+
+    Object.values(gridMap).forEach(cell => {
+        clusters.push({
+            lat: cell.lat / cell.count,
+            lon: cell.lon / cell.count,
+            count: cell.count,
+            voyages: cell.voyages,
+        });
+    });
+
+    return clusters;
 }
 
 function renderNetworkEdges() {

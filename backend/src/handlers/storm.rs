@@ -6,7 +6,7 @@ use serde::Deserialize;
 use sqlx::PgPool;
 
 use crate::analysis::storm;
-use crate::models::{StormAnalysisResponse, StormRiskQuery, VoyageRecord, Port};
+use crate::models::{StormAnalysisResponse, StormRiskQuery, VoyageRecord, Port, PortAlias, PortNameIndex};
 
 pub async fn get_storm_risk(
     State(pool): State<PgPool>,
@@ -35,12 +35,37 @@ pub async fn get_storm_risk(
     .await
     .unwrap_or_default();
 
+    let aliases = sqlx::query_as!(
+        PortAlias,
+        "SELECT id, port_id, alias_name, alias_name_zh, period_start, period_end, language, source \
+         FROM port_aliases"
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    let name_index = PortNameIndex::build(&ports, &aliases);
+
     let (mut risks, heatmap) = storm::analyze_storm_risk(&voyages, &model_type);
 
-    let port_map: std::collections::HashMap<i32, String> = ports.iter().map(|p| (p.id, p.name.clone())).collect();
+    let mut port_map: std::collections::HashMap<i32, String> = ports.iter().map(|p| (p.id, p.name.clone())).collect();
+    for a in &aliases {
+        if !port_map.contains_key(&a.port_id) {
+            port_map.entry(a.port_id).or_insert_with(|| a.alias_name.clone());
+        }
+    }
+
     for risk in &mut risks {
-        risk.departure_port_name = port_map.get(&risk.departure_port_id).cloned().unwrap_or_default();
-        risk.arrival_port_name = port_map.get(&risk.arrival_port_id).cloned().unwrap_or_default();
+        risk.departure_port_name = port_map.get(&risk.departure_port_id).cloned().unwrap_or_else(|| {
+            name_index.lookup(&risk.departure_port_id.to_string())
+                .and_then(|id| port_map.get(&id).cloned())
+                .unwrap_or_default()
+        });
+        risk.arrival_port_name = port_map.get(&risk.arrival_port_id).cloned().unwrap_or_else(|| {
+            name_index.lookup(&risk.arrival_port_id.to_string())
+                .and_then(|id| port_map.get(&id).cloned())
+                .unwrap_or_default()
+        });
     }
 
     Json(StormAnalysisResponse {

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use crate::models::{NetworkResult, TradeEdge, VoyageRecord, Port};
+use crate::models::{NetworkResult, TradeEdge, VoyageRecord, Port, PortNameIndex};
 
 pub struct TradeNetwork {
     adjacency: HashMap<i32, HashMap<i32, f64>>,
@@ -16,6 +16,37 @@ impl TradeNetwork {
             *entry.entry(v.arrival_port_id).or_insert(0.0) += 1.0;
             let entry2 = adjacency.entry(v.arrival_port_id).or_insert_with(HashMap::new);
             *entry2.entry(v.departure_port_id).or_insert(0.0) += 0.5;
+        }
+
+        TradeNetwork {
+            adjacency,
+            ports: ports_map,
+        }
+    }
+
+    pub fn from_voyages_with_index(voyages: &[VoyageRecord], ports: &[Port], name_index: &PortNameIndex) -> Self {
+        let mut adjacency: HashMap<i32, HashMap<i32, f64>> = HashMap::new();
+        let ports_map: HashMap<i32, Port> = ports.iter().map(|p| (p.id, p.clone())).collect();
+
+        for v in voyages {
+            let dep_id = v.departure_port_id;
+            let arr_id = v.arrival_port_id;
+
+            let resolved_dep = if ports_map.contains_key(&dep_id) {
+                dep_id
+            } else {
+                name_index.lookup(&dep_id.to_string()).unwrap_or(dep_id)
+            };
+            let resolved_arr = if ports_map.contains_key(&arr_id) {
+                arr_id
+            } else {
+                name_index.lookup(&arr_id.to_string()).unwrap_or(arr_id)
+            };
+
+            let entry = adjacency.entry(resolved_dep).or_insert_with(HashMap::new);
+            *entry.entry(resolved_arr).or_insert(0.0) += 1.0;
+            let entry2 = adjacency.entry(resolved_arr).or_insert_with(HashMap::new);
+            *entry2.entry(resolved_dep).or_insert(0.0) += 0.5;
         }
 
         TradeNetwork {

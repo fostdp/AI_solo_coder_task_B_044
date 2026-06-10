@@ -73,6 +73,9 @@ pub struct LogisticRegression {
     bias: f64,
     learning_rate: f64,
     iterations: usize,
+    l2_lambda: f64,
+    prior_mean: Vec<f64>,
+    prior_variance: f64,
 }
 
 impl LogisticRegression {
@@ -82,7 +85,21 @@ impl LogisticRegression {
             bias: 0.0,
             learning_rate,
             iterations,
+            l2_lambda: 0.1,
+            prior_mean: Vec::new(),
+            prior_variance: 4.0,
         }
+    }
+
+    pub fn with_regularization(mut self, l2_lambda: f64) -> Self {
+        self.l2_lambda = l2_lambda;
+        self
+    }
+
+    pub fn with_bayesian_prior(mut self, prior_mean: Vec<f64>, prior_variance: f64) -> Self {
+        self.prior_mean = prior_mean;
+        self.prior_variance = prior_variance;
+        self
     }
 
     pub fn fit(&mut self, features: &[Vec<f64>], labels: &[bool]) {
@@ -90,9 +107,28 @@ impl LogisticRegression {
             return;
         }
         let n_features = features[0].len();
-        self.weights = vec![0.0; n_features];
-        self.bias = 0.0;
         let n = features.len() as f64;
+
+        let pos_count = labels.iter().filter(|&&l| l).count() as f64;
+        let neg_count = n - pos_count;
+        let prior_bias = if pos_count > 0.0 && neg_count > 0.0 {
+            (pos_count / neg_count).ln()
+        } else {
+            0.0
+        };
+
+        if self.prior_mean.is_empty() {
+            self.prior_mean = vec![0.0; n_features];
+        }
+        while self.prior_mean.len() < n_features {
+            self.prior_mean.push(0.0);
+        }
+
+        self.weights = self.prior_mean.clone();
+        self.bias = prior_bias;
+
+        let effective_n = n.max(20.0);
+        let prior_strength = effective_n / self.prior_variance;
 
         for _ in 0..self.iterations {
             let mut dw = vec![0.0; n_features];
@@ -110,7 +146,9 @@ impl LogisticRegression {
             }
 
             for (j, w) in self.weights.iter_mut().enumerate() {
-                *w -= self.learning_rate * dw[j] / n;
+                let l2_grad = self.l2_lambda * *w;
+                let prior_grad = prior_strength * (*w - self.prior_mean[j]) / effective_n;
+                *w -= self.learning_rate * (dw[j] / n + l2_grad / n + prior_grad);
             }
             self.bias -= self.learning_rate * db / n;
         }
@@ -118,7 +156,10 @@ impl LogisticRegression {
 
     pub fn predict_proba(&self, feature: &[f64]) -> f64 {
         let z = feature.iter().zip(self.weights.iter()).map(|(f, w)| f * w).sum::<f64>() + self.bias;
-        sigmoid(z)
+        let raw = sigmoid(z);
+        let prior_prob = 0.15;
+        let shrinkage = 1.0 / (1.0 + 5.0 / (feature.len() as f64).max(1.0));
+        shrinkage * raw + (1.0 - shrinkage) * prior_prob
     }
 }
 
@@ -352,10 +393,18 @@ pub fn analyze_storm_risk(
         rf.fit(&feature_vectors, &labels);
         feature_vectors.iter().map(|f| rf.predict_proba(f)).collect()
     } else {
-        let mut lr = LogisticRegression::new(0.01, 500);
+        let n_positive = labels.iter().filter(|&&l| l).count();
+        let l2_lambda = if n_positive < 50 { 1.0 } else if n_positive < 200 { 0.5 } else { 0.1 };
+        let mut lr = LogisticRegression::new(0.01, 500)
+            .with_regularization(l2_lambda)
+            .with_bayesian_prior(vec![0.0; feature_vectors[0].len()], 4.0);
         lr.fit(&feature_vectors, &labels);
         feature_vectors.iter().map(|f| lr.predict_proba(f)).collect()
     };
+
+    let total_positive = labels.iter().filter(|&&l| l).count() as f64;
+    let total_n = labels.len() as f64;
+    let global_rate = if total_n > 0.0 { total_positive / total_n } else { 0.15 };
 
     let mut risks = Vec::new();
     let mut heatmap_points = Vec::new();
@@ -365,7 +414,11 @@ pub fn analyze_storm_risk(
         let avg_prob: f64 = indices.iter().map(|&i| probabilities[i]).sum::<f64>() / n as f64;
         let storm_count = indices.iter().filter(|&&i| voyages[i].encountered_storm).count();
         let observed_rate = storm_count as f64 / n as f64;
-        let confidence = if n > 5 { 0.8 } else if n > 2 { 0.5 } else { 0.2 };
+
+        let shrinkage_weight = (n as f64) / (n as f64 + 10.0);
+        let smoothed_risk = shrinkage_weight * ((avg_prob + observed_rate) / 2.0) + (1.0 - shrinkage_weight) * global_rate;
+
+        let confidence = if n > 20 { 0.9 } else if n > 10 { 0.7 } else if n > 5 { 0.5 } else if n > 2 { 0.3 } else { 0.1 };
 
         risks.push(StormRiskResult {
             departure_port_id: *dep_id,
@@ -373,7 +426,7 @@ pub fn analyze_storm_risk(
             departure_port_name: String::new(),
             arrival_port_name: String::new(),
             season: season.clone(),
-            risk_score: (avg_prob + observed_rate) / 2.0,
+            risk_score: smoothed_risk,
             sample_size: n as i32,
             model_type: model_type.to_string(),
             confidence,

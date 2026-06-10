@@ -58,6 +58,17 @@ CREATE TABLE IF NOT EXISTS wind_fields (
     geom GEOMETRY(Polygon, 4326)
 );
 
+CREATE TABLE IF NOT EXISTS port_aliases (
+    id SERIAL PRIMARY KEY,
+    port_id INTEGER REFERENCES ports(id),
+    alias_name VARCHAR(200) NOT NULL,
+    alias_name_zh VARCHAR(200),
+    period_start INTEGER,
+    period_end INTEGER,
+    language VARCHAR(50),
+    source VARCHAR(200)
+);
+
 CREATE TABLE IF NOT EXISTS network_analysis_results (
     id SERIAL PRIMARY KEY,
     period_start INTEGER NOT NULL,
@@ -98,3 +109,6 @@ CREATE INDEX idx_wind_geom ON wind_fields USING GIST(geom);
 CREATE INDEX idx_network_port ON network_analysis_results(port_id);
 CREATE INDEX idx_network_period ON network_analysis_results(period_start, period_end);
 CREATE INDEX idx_storm_risk_route ON storm_risk_results(departure_port_id, arrival_port_id);
+CREATE INDEX idx_port_aliases_name ON port_aliases(alias_name);
+CREATE INDEX idx_port_aliases_name_zh ON port_aliases(alias_name_zh);
+CREATE INDEX idx_port_aliases_port ON port_aliases(port_id);

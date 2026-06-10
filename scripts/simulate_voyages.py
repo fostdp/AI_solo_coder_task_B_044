@@ -55,6 +55,53 @@ SEASONS = ["spring", "summer", "autumn", "winter"]
 SHIP_TYPES = ["trireme", "merchant_round_ship", "dhow", "junk", "carrack", "longship", "galley", "treasure_ship"]
 CARGO_TYPES = ["grain", "olive_oil", "wine", "spices", "silk", "ceramics", "ivory", "gold", "timber", "salt", "textiles", "glass", "incense", "precious_stones", "copper"]
 
+PORT_ALIASES = [
+    (1, "Alexandria", "亚历山大", None, None, "Greek", "Strabo"),
+    (1, "Raqote", "拉科特", -1000, -300, "Egyptian", "Egyptian records"),
+    (1, "Iskandariyya", "伊斯坎达利亚", 600, 1800, "Arabic", "Arabic geographers"),
+    (2, "Carthago", "迦太基(拉丁)", -800, 150, "Latin", "Roman records"),
+    (2, "Kart-hadasht", "卡尔特-哈达什特", -800, -100, "Punic", "Punic inscriptions"),
+    (3, "Portus", "波尔图", -100, 500, "Latin", "Roman records"),
+    (3, "Ostia", "奥斯提亚(古)", -400, 100, "Latin", "Roman records"),
+    (4, "Piraeus", "比雷埃夫斯(古)", -500, 200, "Greek", "Greek records"),
+    (4, "Kantharos", "坎塔罗斯", -500, -200, "Greek", "Thucydides"),
+    (5, "Byzantium", "拜占庭", -600, 330, "Greek", "Greek sources"),
+    (5, "Byzantion", "拜占庭(希腊)", -600, 330, "Greek", "Greek sources"),
+    (5, "Istanbul", "伊斯坦布尔", 1453, 1800, "Turkish", "Ottoman records"),
+    (5, "Konstantinoupoli", "君士坦丁堡(希腊)", 330, 1453, "Greek", "Byzantine records"),
+    (6, "Tsor", "推罗(希伯来)", -1000, -300, "Hebrew", "Biblical records"),
+    (6, "Sur", "苏尔", 600, 1800, "Arabic", "Arabic geographers"),
+    (7, "Gubla", "古布拉", -2000, -500, "Phoenician", "Phoenician records"),
+    (7, "Jbeil", "朱拜勒", 600, 1800, "Arabic", "Arabic geographers"),
+    (9, "Knossos", "克诺索斯", -2000, -1000, "Greek", "Minoan records"),
+    (9, "Kaptara", "卡普塔拉", -2000, -1400, "Minoan", "Egyptian records"),
+    (10, "Syrakousai", "叙拉古(希腊)", -700, 200, "Greek", "Greek records"),
+    (10, "Siracusa", "锡拉库萨", 200, 1800, "Italian", "Italian records"),
+    (11, "Massalia", "马西利亚(希腊)", -600, 0, "Greek", "Greek records"),
+    (11, "Marseille", "马赛", 0, 1800, "French", "French records"),
+    (12, "Gadir", "加的尔", -1000, -200, "Phoenician", "Phoenician records"),
+    (12, "Gades", "加的斯(拉丁)", -200, 500, "Latin", "Roman records"),
+    (17, "Muziris", "穆吉里斯(古)", -100, 500, "Tamil", "Sangam literature"),
+    (17, "Muchiri", "穆奇里", -100, 500, "Tamil", "Sangam literature"),
+    (18, "Barygaza", "婆卢羯车(古)", -100, 500, "Sanskrit", "Periplus"),
+    (19, "Tamralipti", "耽摩栗底(古)", -300, 800, "Sanskrit", "Indian records"),
+    (21, "Zaiton", "刺桐", 1000, 1400, "Arabic", "Ibn Battuta"),
+    (21, "Citong", "刺桐(元)", 1200, 1400, "Chinese", "Yuan Dynasty records"),
+    (22, "Canton", "广州(英)", 1500, 1800, "English", "British East India"),
+    (22, "Khanfu", "广府", 700, 1000, "Arabic", "Arabic geographers"),
+    (23, "Kozhikode", "科泽科德", 1200, 1800, "Malayalam", "Kerala records"),
+    (24, "Hormuz", "霍尔木兹(新)", 1300, 1800, "Persian", "Persian records"),
+    (24, "Ormus", "奥尔穆兹", 1500, 1700, "Portuguese", "Portuguese records"),
+    (25, "Basra", "巴士拉(古)", 600, 1800, "Arabic", "Arabic geographers"),
+    (25, "Ubullah", "乌布拉", 600, 1000, "Arabic", "Arabic geographers"),
+    (29, "Melaka", "马六甲(马来)", 1400, 1800, "Malay", "Malay Annals"),
+    (30, "Palembang", "巨港", 600, 1400, "Malay", "Srivijaya records"),
+    (33, "Panyu", "番禺", -200, 600, "Chinese", "Chinese records"),
+    (35, "Olisipo", "奥利西波", -200, 500, "Latin", "Roman records"),
+    (35, "Lishbuna", "里斯本(阿拉伯)", 700, 1100, "Arabic", "Arabic geographers"),
+    (37, "Venezia", "威尼斯(意)", 800, 1800, "Italian", "Venetian records"),
+]
+
 STORM_PRONE_SEASONS = {"autumn": 0.25, "winter": 0.30, "spring": 0.12, "summer": 0.08}
 
 REGION_CONNECTIONS = {
@@ -165,6 +212,15 @@ def insert_ports(cur):
         values.append((p[0], p[1], p[2], p[3], geom))
     execute_values(cur, sql, values)
 
+def insert_port_aliases(cur):
+    sql = """INSERT INTO port_aliases
+        (port_id, alias_name, alias_name_zh, period_start, period_end, language, source)
+        VALUES %s"""
+    values = []
+    for a in PORT_ALIASES:
+        values.append((a[0], a[1], a[2], a[3], a[4], a[5], a[6]))
+    execute_values(cur, sql, values)
+
 def insert_voyages(cur, voyages):
     sql = """INSERT INTO voyage_records
         (departure_port_id, arrival_port_id, voyage_year, season, ship_type, cargo_type,
@@ -226,6 +282,7 @@ def main():
             )
             cur = conn.cursor()
             insert_ports(cur)
+            insert_port_aliases(cur)
             insert_voyages(cur, voyages)
             conn.commit()
             cur.close()

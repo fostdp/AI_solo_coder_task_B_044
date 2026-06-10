@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Port {
@@ -9,6 +10,149 @@ pub struct Port {
     pub region: Option<String>,
     pub lat: Option<f64>,
     pub lon: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PortAlias {
+    pub id: i32,
+    pub port_id: i32,
+    pub alias_name: String,
+    pub alias_name_zh: Option<String>,
+    pub period_start: Option<i32>,
+    pub period_end: Option<i32>,
+    pub language: Option<String>,
+    pub source: Option<String>,
+}
+
+pub struct PortNameIndex {
+    name_to_id: HashMap<String, i32>,
+    normalized_to_id: HashMap<String, i32>,
+}
+
+impl PortNameIndex {
+    pub fn build(ports: &[Port], aliases: &[PortAlias]) -> Self {
+        let mut name_to_id = HashMap::new();
+        let mut normalized_to_id = HashMap::new();
+
+        for p in ports {
+            name_to_id.insert(p.name.to_lowercase(), p.id);
+            if let Some(ref zh) = p.name_zh {
+                name_to_id.insert(zh.clone(), p.id);
+            }
+            normalized_to_id.insert(Self::normalize(&p.name), p.id);
+        }
+
+        for a in aliases {
+            name_to_id.insert(a.alias_name.to_lowercase(), a.port_id);
+            if let Some(ref zh) = a.alias_name_zh {
+                name_to_id.insert(zh.clone(), a.port_id);
+            }
+            normalized_to_id.insert(Self::normalize(&a.alias_name), a.port_id);
+        }
+
+        PortNameIndex { name_to_id, normalized_to_id }
+    }
+
+    pub fn lookup(&self, name: &str) -> Option<i32> {
+        if let Some(&id) = self.name_to_id.get(&name.to_lowercase()) {
+            return Some(id);
+        }
+        if let Some(&id) = self.name_to_id.get(name) {
+            return Some(id);
+        }
+        let norm = Self::normalize(name);
+        if let Some(&id) = self.normalized_to_id.get(&norm) {
+            return Some(id);
+        }
+        self.fuzzy_lookup(name)
+    }
+
+    fn normalize(name: &str) -> String {
+        let lower = name.to_lowercase();
+        lower
+            .replace("ae", "e")
+            .replace("oe", "e")
+            .replace("ph", "f")
+            .replace("th", "t")
+            .replace("ou", "u")
+            .replace("-", "")
+            .replace(" ", "")
+            .replace("'", "")
+    }
+
+    fn fuzzy_lookup(&self, name: &str) -> Option<i32> {
+        let query_lower = name.to_lowercase();
+        let query_norm = Self::normalize(name);
+        let query_chars: Vec<char> = query_lower.chars().collect();
+        let mut best_id: Option<i32> = None;
+        let mut best_score: f64 = 0.6;
+
+        for (key, &id) in &self.name_to_id {
+            let key_chars: Vec<char> = key.chars().collect();
+            let score = Self::jaro_winkler(&query_chars, &key_chars);
+            if score > best_score {
+                best_score = score;
+                best_id = Some(id);
+            }
+        }
+
+        if best_id.is_none() {
+            for (key, &id) in &self.normalized_to_id {
+                let key_chars: Vec<char> = key.chars().collect();
+                let query_norm_chars: Vec<char> = query_norm.chars().collect();
+                let score = Self::jaro_winkler(&query_norm_chars, &key_chars);
+                if score > best_score {
+                    best_score = score;
+                    best_id = Some(id);
+                }
+            }
+        }
+
+        best_id
+    }
+
+    fn jaro_winkler(s1: &[char], s2: &[char]) -> f64 {
+        if s1.is_empty() && s2.is_empty() { return 1.0; }
+        if s1.is_empty() || s2.is_empty() { return 0.0; }
+
+        let max_dist = (s1.len().max(s2.len()) / 2).max(1).saturating_sub(1);
+        let mut s1_matches = vec![false; s1.len()];
+        let mut s2_matches = vec![false; s2.len()];
+
+        let mut matches = 0usize;
+        let mut transpositions = 0usize;
+
+        for (i, &c1) in s1.iter().enumerate() {
+            let start = if i > max_dist { i - max_dist } else { 0 };
+            let end = (i + max_dist + 1).min(s2.len());
+            for j in start..end {
+                if !s2_matches[j] && c1 == s2[j] {
+                    s1_matches[i] = true;
+                    s2_matches[j] = true;
+                    matches += 1;
+                    break;
+                }
+            }
+        }
+
+        if matches == 0 { return 0.0; }
+
+        let mut k = 0usize;
+        for (i, &matched) in s1_matches.iter().enumerate() {
+            if matched {
+                while !s2_matches[k] { k += 1; }
+                if s1[i] != s2[k] { transpositions += 1; }
+                k += 1;
+            }
+        }
+
+        let jaro = (matches as f64 / s1.len() as f64
+            + matches as f64 / s2.len() as f64
+            + (matches - transpositions / 2) as f64 / matches as f64) / 3.0;
+
+        let prefix_len = s1.iter().zip(s2.iter()).take(4).filter(|(a, b)| a == b).count();
+        jaro + prefix_len as f64 * 0.1 * (1.0 - jaro)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
