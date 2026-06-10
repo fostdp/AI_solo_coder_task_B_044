@@ -18,20 +18,60 @@ services:
       timeout: 5s
       retries: 5
 
-  backend:
+  voyage-loader:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        BINARY: voyage_loader
     environment:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/ancient_maritime
-      RUST_LOG: ancient_maritime_backend=debug
+      CONFIG_PATH: /app/config.toml
+      RUST_LOG: voyage_loader=debug
     ports:
-      - "3000:3000"
+      - "3001:3001"
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
+      - ./backend/config.toml:/app/config.toml
       - ./frontend:/app/frontend
+
+  network-analyzer:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        BINARY: network_analyzer
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/ancient_maritime
+      CONFIG_PATH: /app/config.toml
+      RUST_LOG: network_analyzer=debug
+    ports:
+      - "3002:3002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend/config.toml:/app/config.toml
+
+  storm-risk-modeler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        BINARY: storm_risk_modeler
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/ancient_maritime
+      CONFIG_PATH: /app/config.toml
+      RUST_LOG: storm_risk_modeler=debug
+    ports:
+      - "3003:3003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend/config.toml:/app/config.toml
 
   data-loader:
     image: python:3.11-slim

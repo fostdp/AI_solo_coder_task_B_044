@@ -1,11 +1,13 @@
 FROM rust:1.75 as builder
+ARG BINARY=voyage_loader
 WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-RUN cargo build --release
+COPY . .
+RUN cargo build --release -p ${BINARY}
 
 FROM debian:bookworm-slim
+ARG BINARY=voyage_loader
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/ancient-maritime-backend /usr/local/bin/
-EXPOSE 3000
-CMD ["ancient-maritime-backend"]
+COPY --from=builder /app/target/release/${BINARY} /usr/local/bin/app
+COPY --from=builder /app/config.toml /app/config.toml
+EXPOSE 3001 3002 3003
+CMD ["app"]

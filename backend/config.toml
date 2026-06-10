@@ -1,0 +1,35 @@
+[database]
+url = "postgres://postgres:postgres@localhost:5432/ancient_maritime"
+max_connections = 20
+
+[voyage_loader]
+port = 3001
+max_query_limit = 2000
+
+[network_analyzer]
+port = 3002
+betweenness_sample_size = 20
+community_max_iterations = 10
+hub_top_k = 5
+
+[storm_risk_modeler]
+port = 3003
+
+[storm_risk_modeler.logistic_regression]
+learning_rate = 0.01
+iterations = 500
+l2_lambda_sparse = 1.0
+l2_lambda_medium = 0.5
+l2_lambda_dense = 0.1
+sparse_threshold = 50
+medium_threshold = 200
+prior_variance = 4.0
+prior_storm_rate = 0.15
+prediction_shrinkage_k = 5.0
+smoothing_k = 10.0
+
+[storm_risk_modeler.random_forest]
+n_trees = 10
+max_depth = 5
+min_samples = 5
+sample_ratio = 0.7
