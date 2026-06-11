@@ -276,6 +276,7 @@ fn generate_modern_heatmap(
 fn compute_route_comparisons(
     ancient_risks: &[StormRiskResult],
     modern_forecasts: &[ModernWeatherForecast],
+    grid_index: &SpatialGridIndex,
     ancient_routes: &HashMap<(i32, i32), Vec<Vec<f64>>>,
     port_coords: &HashMap<i32, (f64, f64)>,
     ship: Option<&ModernShip>,
@@ -300,16 +301,18 @@ fn compute_route_comparisons(
             Vec::new()
         };
 
-        let nearest_forecast = modern_forecasts.iter().min_by(|a, b| {
-            let ref_lat = dep_coord.map(|c| c.0).unwrap_or(a.lat);
-            let ref_lon = dep_coord.map(|c| c.1).unwrap_or(a.lon);
-            let da = haversine_distance_km(ref_lat, ref_lon, a.lat, a.lon);
-            let db = haversine_distance_km(ref_lat, ref_lon, b.lat, b.lon);
-            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        let nearest_forecast_idx = if let Some(&(ref_lat, ref_lon)) = dep_coord {
+            grid_index.query_nearest(ref_lat, ref_lon, modern_forecasts)
+        } else {
+            modern_forecasts.first().map(|_| 0usize)
+        };
 
-        let modern_risk = if let Some(f) = nearest_forecast {
-            calculate_single_modern_risk(f, 10.0, ship, ship_type, config, global_avg_modern)
+        let modern_risk = if let Some(idx) = nearest_forecast_idx {
+            if let Some(f) = modern_forecasts.get(idx) {
+                calculate_single_modern_risk(f, 10.0, ship, ship_type, config, global_avg_modern)
+            } else {
+                global_avg_modern
+            }
         } else {
             global_avg_modern
         };
@@ -462,6 +465,12 @@ pub async fn get_modern_comparison(
         .unwrap_or_default()
     };
 
+    let grid_index = SpatialGridIndex::build_with_cell_size(
+        &weather_forecasts,
+        config.spatial_grid_km,
+        config.spatial_grid_km,
+    );
+
     let modern_ships = sqlx::query_as!(
         ModernShip,
         "SELECT id, ship_name, mmsi, ship_type, gross_tonnage, length_m, beam_m, \
@@ -508,23 +517,25 @@ pub async fn get_modern_comparison(
             let dep_coord = port_coords.get(&ancient.departure_port_id);
             let arr_coord = port_coords.get(&ancient.arrival_port_id);
 
-            let nearest_forecast = weather_forecasts.iter().min_by(|a, b| {
-                let ref_lat = dep_coord.map(|c| c.0).unwrap_or(a.lat);
-                let ref_lon = dep_coord.map(|c| c.1).unwrap_or(a.lon);
-                let da = haversine_distance_km(ref_lat, ref_lon, a.lat, a.lon);
-                let db = haversine_distance_km(ref_lat, ref_lon, b.lat, b.lon);
-                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            let nearest_forecast_idx = if let Some(&(ref_lat, ref_lon)) = dep_coord {
+                grid_index.query_nearest(ref_lat, ref_lon, &weather_forecasts)
+            } else {
+                weather_forecasts.first().map(|_| 0usize)
+            };
 
-            let risk_score = if let Some(f) = nearest_forecast {
-                calculate_single_modern_risk(
-                    f,
-                    10.0,
-                    ship_ref,
-                    &ship_type,
-                    config,
-                    global_avg_modern,
-                )
+            let risk_score = if let Some(idx) = nearest_forecast_idx {
+                if let Some(f) = weather_forecasts.get(idx) {
+                    calculate_single_modern_risk(
+                        f,
+                        10.0,
+                        ship_ref,
+                        &ship_type,
+                        config,
+                        global_avg_modern,
+                    )
+                } else {
+                    global_avg_modern
+                }
             } else {
                 global_avg_modern
             };
@@ -615,6 +626,7 @@ pub async fn get_modern_comparison(
     let _route_comparisons = compute_route_comparisons(
         &ancient_risks_query,
         &weather_forecasts,
+        &grid_index,
         &ancient_routes,
         &port_coords,
         ship_ref,
@@ -629,6 +641,217 @@ pub async fn get_modern_comparison(
         comparison_summary,
         heatmap_ancient,
         heatmap_modern,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AisStreamBatch {
+    pub batch_id: u64,
+    pub records: Vec<ModernShip>,
+    pub batch_size: usize,
+    pub window_start_ms: u64,
+    pub window_end_ms: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RegionRiskAggregator {
+    pub per_region_sum_risk: HashMap<String, f64>,
+    pub per_region_count: HashMap<String, usize>,
+    pub total_processed: u64,
+}
+
+impl RegionRiskAggregator {
+    pub fn add_record(&mut self, region: &str, risk: f64) {
+        *self.per_region_sum_risk.entry(region.to_string()).or_insert(0.0) += risk;
+        *self.per_region_count.entry(region.to_string()).or_insert(0) += 1;
+        self.total_processed += 1;
+    }
+
+    pub fn get_region_avg(&self, region: &str) -> Option<f64> {
+        let sum = self.per_region_sum_risk.get(region)?;
+        let count = self.per_region_count.get(region)?;
+        if *count > 0 {
+            Some(sum / *count as f64)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamingAisProcessor {
+    pub buffer: Vec<ModernShip>,
+    pub max_buffer_size: usize,
+    pub flush_interval_ms: u64,
+    pub last_flush_ms: u64,
+    pub aggregator: RegionRiskAggregator,
+    batch_counter: u64,
+}
+
+impl StreamingAisProcessor {
+    pub fn new(max_buffer: usize, flush_interval: u64) -> Self {
+        StreamingAisProcessor {
+            buffer: Vec::with_capacity(max_buffer),
+            max_buffer_size: max_buffer,
+            flush_interval_ms: flush_interval,
+            last_flush_ms: 0,
+            aggregator: RegionRiskAggregator::default(),
+            batch_counter: 0,
+        }
+    }
+
+    pub fn ingest(&mut self, ship: ModernShip) {
+        self.buffer.push(ship);
+    }
+
+    pub fn ingest_batch(&mut self, ships: &[ModernShip]) {
+        self.buffer.extend_from_slice(ships);
+    }
+
+    pub fn flush_if_needed(&mut self, now_ms: u64) -> Option<AisStreamBatch> {
+        let should_flush = self.buffer.len() >= self.max_buffer_size
+            || (now_ms >= self.last_flush_ms + self.flush_interval_ms && !self.buffer.is_empty());
+
+        if should_flush {
+            self.batch_counter += 1;
+            let batch_size = self.buffer.len();
+            let batch = AisStreamBatch {
+                batch_id: self.batch_counter,
+                records: std::mem::take(&mut self.buffer),
+                batch_size,
+                window_start_ms: self.last_flush_ms,
+                window_end_ms: now_ms,
+            };
+            self.last_flush_ms = now_ms;
+            Some(batch)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_preaggregated_risks(&self) -> HashMap<String, (f64, usize)> {
+        let mut result = HashMap::new();
+        for (region, sum) in &self.aggregator.per_region_sum_risk {
+            if let Some(&count) = self.aggregator.per_region_count.get(region) {
+                result.insert(region.clone(), (*sum, count));
+            }
+        }
+        result
+    }
+}
+
+pub fn preaggregate_forecast_risks(
+    forecasts: &[ModernWeatherForecast],
+    ship: Option<&ModernShip>,
+    config: &ModernComparisonConfig,
+    global_avg: f64,
+    ship_type: &str,
+) -> HashMap<String, (f64, f64, usize)> {
+    let mut region_stats: HashMap<String, (f64, f64, usize)> = HashMap::new();
+
+    for f in forecasts {
+        let risk = calculate_single_modern_risk(f, 10.0, ship, ship_type, config, global_avg);
+        let entry = region_stats.entry(f.region.clone()).or_insert((0.0, f64::NEG_INFINITY, 0));
+        entry.0 += risk;
+        entry.1 = entry.1.max(risk);
+        entry.2 += 1;
+    }
+
+    for (_, stats) in region_stats.iter_mut() {
+        if stats.2 > 0 {
+            stats.0 /= stats.2 as f64;
+        }
+    }
+
+    region_stats
+}
+
+#[derive(Debug, Clone)]
+pub struct SpatialGridIndex {
+    pub lat_cell_size_km: f64,
+    pub lon_cell_size_km: f64,
+    pub cells: HashMap<(i32, i32), Vec<usize>>,
+}
+
+impl SpatialGridIndex {
+    const EARTH_RADIUS_KM: f64 = 6371.0;
+
+    pub fn build(forecasts: &[ModernWeatherForecast]) -> Self {
+        Self::build_with_cell_size(forecasts, 100.0, 100.0)
+    }
+
+    pub fn build_with_cell_size(
+        forecasts: &[ModernWeatherForecast],
+        lat_cell_km: f64,
+        lon_cell_km: f64,
+    ) -> Self {
+        let mut cells: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+
+        let lat_cell_deg = (lat_cell_km / Self::EARTH_RADIUS_KM).to_degrees();
+        let lon_cell_deg_base = (lon_cell_km / Self::EARTH_RADIUS_KM).to_degrees();
+
+        for (idx, f) in forecasts.iter().enumerate() {
+            let lat_cell = (f.lat / lat_cell_deg).floor() as i32;
+            let lon_scale = f.lat.to_radians().cos().max(0.01);
+            let lon_cell_deg = lon_cell_deg_base / lon_scale;
+            let lon_cell = (f.lon / lon_cell_deg).floor() as i32;
+
+            cells.entry((lat_cell, lon_cell)).or_default().push(idx);
+        }
+
+        SpatialGridIndex {
+            lat_cell_size_km: lat_cell_km,
+            lon_cell_size_km: lon_cell_km,
+            cells,
+        }
+    }
+
+    pub fn query_nearest(
+        &self,
+        lat: f64,
+        lon: f64,
+        forecasts: &[ModernWeatherForecast],
+    ) -> Option<usize> {
+        let lat_cell_deg = (self.lat_cell_size_km / Self::EARTH_RADIUS_KM).to_degrees();
+        let lon_cell_deg_base = (self.lon_cell_size_km / Self::EARTH_RADIUS_KM).to_degrees();
+
+        let center_lat_cell = (lat / lat_cell_deg).floor() as i32;
+        let lon_scale = lat.to_radians().cos().max(0.01);
+        let lon_cell_deg = lon_cell_deg_base / lon_scale;
+        let center_lon_cell = (lon / lon_cell_deg).floor() as i32;
+
+        let mut best_idx: Option<usize> = None;
+        let mut best_dist = f64::INFINITY;
+
+        for d_lat in -1..=1 {
+            for d_lon in -1..=1 {
+                let cell_key = (center_lat_cell + d_lat, center_lon_cell + d_lon);
+                if let Some(indices) = self.cells.get(&cell_key) {
+                    for &idx in indices {
+                        if let Some(f) = forecasts.get(idx) {
+                            let dist = haversine_distance_km(lat, lon, f.lat, f.lon);
+                            if dist < best_dist {
+                                best_dist = dist;
+                                best_idx = Some(idx);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if best_idx.is_none() {
+            let mut fallback_dist = f64::INFINITY;
+            for (idx, f) in forecasts.iter().enumerate() {
+                let dist = haversine_distance_km(lat, lon, f.lat, f.lon);
+                if dist < fallback_dist {
+                    fallback_dist = dist;
+                    best_idx = Some(idx);
+                }
+            }
+        }
+
+        best_idx
     }
 }
 
@@ -676,6 +899,7 @@ mod tests {
             modern_risk_multiplier: 0.8,
             tech_improvement_factor: 0.3,
             weather_forecast_accuracy: 0.8,
+            ..Default::default()
         }
     }
 
@@ -916,11 +1140,13 @@ mod tests {
                 modern_risk_multiplier: 0.8,
                 tech_improvement_factor: 0.1,
                 weather_forecast_accuracy: 0.8,
+                ..Default::default()
             };
             let high_tech = ModernComparisonConfig {
                 modern_risk_multiplier: 0.8,
                 tech_improvement_factor: 0.5,
                 weather_forecast_accuracy: 0.8,
+                ..Default::default()
             };
 
             let low_tech_risk = calculate_single_modern_risk(&forecast, 10.0, Some(&ship), "cargo_ship", &low_tech, global_avg);

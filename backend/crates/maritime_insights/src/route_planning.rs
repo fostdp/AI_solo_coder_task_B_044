@@ -286,11 +286,23 @@ fn compute_move_cost(
     let avg_wind_dir = (from_cell.wind_direction_deg + to_cell.wind_direction_deg) / 2.0;
     let avg_storm_risk = (from_cell.storm_risk + to_cell.storm_risk) / 2.0;
 
+    if avg_storm_risk >= config.storm_risk_hard_threshold {
+        return f64::INFINITY;
+    }
+
     let current_assist = speed_projection_on_heading(avg_current_speed, avg_current_dir, heading)
         * config.current_weight;
     let wind_assist =
         speed_projection_on_heading(avg_wind_speed, avg_wind_dir, heading) * config.wind_weight;
-    let risk_penalty = avg_storm_risk * config.storm_risk_weight * ship_base_speed_knots;
+
+    let risk_penalty = if avg_storm_risk >= config.storm_risk_soft_threshold {
+        let normalized_risk = (avg_storm_risk - config.storm_risk_soft_threshold)
+            / (config.storm_risk_hard_threshold - config.storm_risk_soft_threshold);
+        let exponential_penalty = (normalized_risk * 5.0).exp() - 1.0;
+        exponential_penalty * config.storm_risk_weight * ship_base_speed_knots
+    } else {
+        avg_storm_risk * config.storm_risk_weight * ship_base_speed_knots
+    };
 
     let effective_speed = ship_base_speed_knots + current_assist + wind_assist - risk_penalty;
     let effective_speed = effective_speed.max(MIN_SPEED_KNOTS);
@@ -1108,6 +1120,179 @@ pub fn compare_routes(
     }
 }
 
+#[derive(Debug, Clone)]
+struct StormAvoidanceConfig {
+    storm_risk_hard_threshold: f64,
+    storm_risk_soft_threshold: f64,
+    detour_distance_max_km: f64,
+    dynamic_risk_weight: f64,
+}
+
+impl Default for StormAvoidanceConfig {
+    fn default() -> Self {
+        StormAvoidanceConfig {
+            storm_risk_hard_threshold: 0.8,
+            storm_risk_soft_threshold: 0.5,
+            detour_distance_max_km: 500.0,
+            dynamic_risk_weight: 2.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StormCell {
+    i: usize,
+    j: usize,
+    risk_level: f64,
+    radius_km: f64,
+    season: String,
+}
+
+impl StormAvoidanceConfig {
+    fn from_route_config(config: &RoutePlanningConfig) -> Self {
+        StormAvoidanceConfig {
+            storm_risk_hard_threshold: config.storm_risk_hard_threshold,
+            storm_risk_soft_threshold: config.storm_risk_soft_threshold,
+            detour_distance_max_km: 500.0,
+            dynamic_risk_weight: 2.0,
+        }
+    }
+}
+
+fn detect_extreme_weather_cells(
+    grid: &RouteGrid,
+    config: &StormAvoidanceConfig,
+    season: &str,
+) -> Vec<StormCell> {
+    let mut storm_cells = Vec::new();
+    for i in 0..grid.lat_steps {
+        for j in 0..grid.lon_steps {
+            let cell = grid.cell_at(i, j);
+            if cell.storm_risk >= config.storm_risk_soft_threshold {
+                let radius_km = if cell.storm_risk >= config.storm_risk_hard_threshold {
+                    grid.grid_res_km * 3.0
+                } else {
+                    grid.grid_res_km * 1.5
+                };
+                storm_cells.push(StormCell {
+                    i,
+                    j,
+                    risk_level: cell.storm_risk,
+                    radius_km,
+                    season: season.to_string(),
+                });
+            }
+        }
+    }
+    storm_cells
+}
+
+fn apply_storm_avoidance_penalty(
+    grid: &mut RouteGrid,
+    storm_cells: &[StormCell],
+    config: &StormAvoidanceConfig,
+) {
+    for storm in storm_cells {
+        let radius_cells = (storm.radius_km / grid.grid_res_km).ceil() as isize;
+        for di in -radius_cells..=radius_cells {
+            for dj in -radius_cells..=radius_cells {
+                let ni = storm.i as isize + di;
+                let nj = storm.j as isize + dj;
+                if ni < 0 || nj < 0 {
+                    continue;
+                }
+                let ni = ni as usize;
+                let nj = nj as usize;
+                if ni >= grid.lat_steps || nj >= grid.lon_steps {
+                    continue;
+                }
+                let dist_km = grid.cell_distance_km(storm.i, storm.j, ni, nj);
+                if dist_km <= storm.radius_km {
+                    let cell = grid.cell_at_mut(ni, nj);
+                    if storm.risk_level >= config.storm_risk_hard_threshold {
+                        cell.storm_risk = cell.storm_risk.max(config.storm_risk_hard_threshold);
+                    } else {
+                        let influence = 1.0 - (dist_km / storm.radius_km).min(1.0);
+                        let additional_risk = storm.risk_level * influence * config.dynamic_risk_weight * 0.5;
+                        cell.storm_risk = (cell.storm_risk + additional_risk).min(0.99);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn plan_route_with_storm_avoidance(
+    grid: &mut RouteGrid,
+    start_i: usize,
+    start_j: usize,
+    goal_i: usize,
+    goal_j: usize,
+    ship_base_speed_knots: f64,
+    ship_max_speed_knots: f64,
+    config: &RoutePlanningConfig,
+    season: &str,
+) -> Option<(Vec<(usize, usize)>, f64)> {
+    let storm_config = StormAvoidanceConfig::from_route_config(config);
+    let storm_cells = detect_extreme_weather_cells(grid, &storm_config, season);
+    apply_storm_avoidance_penalty(grid, &storm_cells, &storm_config);
+
+    let straight_line_km = grid.cell_distance_km(start_i, start_j, goal_i, goal_j);
+    let max_detour_km = straight_line_km * config.max_detour_ratio;
+
+    if let Some((path, cost)) = a_star_search(
+        grid, start_i, start_j, goal_i, goal_j, ship_base_speed_knots, ship_max_speed_knots, config,
+    ) {
+        let mut total_km = 0.0;
+        for i in 0..path.len().saturating_sub(1) {
+            let (i1, j1) = path[i];
+            let (i2, j2) = path[i + 1];
+            total_km += grid.cell_distance_km(i1, j1, i2, j2);
+        }
+
+        if total_km <= max_detour_km {
+            let enters_high_risk = path.iter().any(|&(i, j)| {
+                grid.cell_at(i, j).storm_risk >= storm_config.storm_risk_hard_threshold
+            });
+
+            if !enters_high_risk {
+                return Some((path, cost));
+            }
+        }
+
+        for storm in &storm_cells {
+            if storm.risk_level >= storm_config.storm_risk_hard_threshold {
+                let local_start_i = start_i;
+                let local_start_j = start_j;
+                let reroute_result = a_star_search(
+                    grid, local_start_i, local_start_j, goal_i, goal_j,
+                    ship_base_speed_knots, ship_max_speed_knots, config,
+                );
+                if let Some((new_path, new_cost)) = reroute_result {
+                    let mut new_total_km = 0.0;
+                    for i in 0..new_path.len().saturating_sub(1) {
+                        let (i1, j1) = new_path[i];
+                        let (i2, j2) = new_path[i + 1];
+                        new_total_km += grid.cell_distance_km(i1, j1, i2, j2);
+                    }
+                    if new_total_km <= max_detour_km {
+                        let enters_reroute = new_path.iter().any(|&(i, j)| {
+                            grid.cell_at(i, j).storm_risk >= storm_config.storm_risk_hard_threshold
+                        });
+                        if !enters_reroute {
+                            return Some((new_path, new_cost));
+                        }
+                    }
+                }
+            }
+        }
+
+        return Some((path, cost));
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1126,6 +1311,9 @@ mod tests {
             wind_weight: 0.5,
             storm_risk_weight: 10.0,
             distance_weight: 1.0,
+            storm_risk_hard_threshold: 0.8,
+            storm_risk_soft_threshold: 0.5,
+            max_detour_ratio: 1.5,
         }
     }
 

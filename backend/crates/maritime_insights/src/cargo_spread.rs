@@ -500,13 +500,57 @@ pub fn build_cargo_spread_network(
     cargo_type: &str,
     hub_top_k: usize,
 ) -> SpreadNetwork {
+    let classified = classify_cargo_type(cargo_type);
+    let (diffusion_rate, cultural_weight) = match &classified {
+        Some(s) => (s.category.diffusion_rate(), s.category.cultural_weight()),
+        None => (1.0, 1.0),
+    };
+
     let filtered_voyages: Vec<VoyageRecord> = voyages
         .iter()
-        .filter(|v| v.cargo_type == cargo_type)
+        .filter(|v| {
+            if v.cargo_type == cargo_type {
+                return true;
+            }
+            if let Some(ref s) = classified {
+                let v_lower = v.cargo_type.to_lowercase();
+                v_lower.contains(s.code)
+                    || v_lower.contains(s.name)
+                    || v_lower.contains(s.name_zh)
+                    || s.code == v.cargo_type.to_lowercase()
+            } else {
+                false
+            }
+        })
         .cloned()
         .collect();
 
-    let graph = SpreadGraph::from_voyages(&filtered_voyages, ports);
+    let mut graph = SpreadGraph::new();
+    graph.ports = ports.iter().map(|p| (p.id, p.clone())).collect();
+
+    for v in &filtered_voyages {
+        let from = v.departure_port_id;
+        let to = v.arrival_port_id;
+        let year = v.voyage_year;
+
+        let edge_weight = diffusion_rate * cultural_weight;
+        let entry = graph.adjacency.entry(from).or_insert_with(HashMap::new);
+        *entry.entry(to).or_insert(0.0) += edge_weight;
+
+        *graph.trade_volume.entry(from).or_insert(0.0) += edge_weight;
+        *graph.trade_volume.entry(to).or_insert(0.0) += edge_weight;
+
+        let current_from = graph.first_year.get(&from).copied().unwrap_or(i32::MAX);
+        if year < current_from {
+            graph.first_year.insert(from, year);
+        }
+
+        let current_to = graph.first_year.get(&to).copied().unwrap_or(i32::MAX);
+        if year < current_to {
+            graph.first_year.insert(to, year);
+        }
+    }
+
     let betweenness = graph.compute_betweenness_bfs();
     let adoption = graph.compute_adoption_levels();
     let origin_ports = graph.find_origin_ports();
@@ -771,6 +815,390 @@ pub async fn analyze_cargo_spread(
         tech_diffusions,
         spread_network,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CargoCategory {
+    LuxuryGoods,
+    StapleFoods,
+    RawMaterials,
+    ManufacturedGoods,
+    CulturalRelics,
+    StrategicMaterials,
+}
+
+impl CargoCategory {
+    pub fn name(&self) -> &'static str {
+        match self {
+            CargoCategory::LuxuryGoods => "luxury_goods",
+            CargoCategory::StapleFoods => "staple_foods",
+            CargoCategory::RawMaterials => "raw_materials",
+            CargoCategory::ManufacturedGoods => "manufactured_goods",
+            CargoCategory::CulturalRelics => "cultural_relics",
+            CargoCategory::StrategicMaterials => "strategic_materials",
+        }
+    }
+
+    pub fn name_zh(&self) -> &'static str {
+        match self {
+            CargoCategory::LuxuryGoods => "奢侈品",
+            CargoCategory::StapleFoods => "主食",
+            CargoCategory::RawMaterials => "原材料",
+            CargoCategory::ManufacturedGoods => "制成品",
+            CargoCategory::CulturalRelics => "文物/宗教",
+            CargoCategory::StrategicMaterials => "战略物资",
+        }
+    }
+
+    pub fn diffusion_rate(&self) -> f64 {
+        match self {
+            CargoCategory::LuxuryGoods => 0.85,
+            CargoCategory::StapleFoods => 0.95,
+            CargoCategory::RawMaterials => 0.70,
+            CargoCategory::ManufacturedGoods => 0.75,
+            CargoCategory::CulturalRelics => 0.40,
+            CargoCategory::StrategicMaterials => 0.55,
+        }
+    }
+
+    pub fn cultural_weight(&self) -> f64 {
+        match self {
+            CargoCategory::LuxuryGoods => 1.5,
+            CargoCategory::StapleFoods => 0.6,
+            CargoCategory::RawMaterials => 0.8,
+            CargoCategory::ManufacturedGoods => 1.2,
+            CargoCategory::CulturalRelics => 2.5,
+            CargoCategory::StrategicMaterials => 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CargoSubtype {
+    pub code: &'static str,
+    pub name: &'static str,
+    pub name_zh: &'static str,
+    pub category: CargoCategory,
+    pub origin_regions: Vec<&'static str>,
+    pub tech_requirement: f64,
+    pub rarity_score: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct HierarchicalSpreadGraph {
+    base_graph: SpreadGraph,
+    by_category: HashMap<CargoCategory, SpreadGraph>,
+    by_subtype: HashMap<String, SpreadGraph>,
+}
+
+impl HierarchicalSpreadGraph {
+    pub fn new() -> Self {
+        HierarchicalSpreadGraph {
+            base_graph: SpreadGraph::new(),
+            by_category: HashMap::new(),
+            by_subtype: HashMap::new(),
+        }
+    }
+
+    pub fn by_category(&self, category: &CargoCategory) -> Option<&SpreadGraph> {
+        self.by_category.get(category)
+    }
+
+    pub fn by_subtype(&self, code: &str) -> Option<&SpreadGraph> {
+        self.by_subtype.get(code)
+    }
+
+    pub fn base_graph(&self) -> &SpreadGraph {
+        &self.base_graph
+    }
+
+    pub fn build_multi_layer(voyages: &[VoyageRecord], ports: &[Port]) -> Self {
+        let mut result = HierarchicalSpreadGraph::new();
+        result.base_graph = SpreadGraph::from_voyages(voyages, ports);
+
+        let mut category_voyages: HashMap<CargoCategory, Vec<VoyageRecord>> = HashMap::new();
+        let mut subtype_voyages: HashMap<String, Vec<VoyageRecord>> = HashMap::new();
+
+        for v in voyages {
+            if let Some(subtype) = classify_cargo_type(&v.cargo_type) {
+                category_voyages
+                    .entry(subtype.category.clone())
+                    .or_insert_with(Vec::new)
+                    .push(v.clone());
+                subtype_voyages
+                    .entry(subtype.code.to_string())
+                    .or_insert_with(Vec::new)
+                    .push(v.clone());
+            }
+        }
+
+        for (cat, vs) in category_voyages {
+            result
+                .by_category
+                .insert(cat, SpreadGraph::from_voyages(&vs, ports));
+        }
+
+        for (code, vs) in subtype_voyages {
+            result
+                .by_subtype
+                .insert(code, SpreadGraph::from_voyages(&vs, ports));
+        }
+
+        result
+    }
+}
+
+impl Default for HierarchicalSpreadGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub const CARGO_HIERARCHY: &[CargoSubtype] = &[
+    CargoSubtype {
+        code: "porcelain",
+        name: "porcelain",
+        name_zh: "瓷器",
+        category: CargoCategory::ManufacturedGoods,
+        origin_regions: vec!["China", "East Asia"],
+        tech_requirement: 0.8,
+        rarity_score: 0.7,
+    },
+    CargoSubtype {
+        code: "silk",
+        name: "silk",
+        name_zh: "丝绸",
+        category: CargoCategory::LuxuryGoods,
+        origin_regions: vec!["China", "East Asia"],
+        tech_requirement: 0.7,
+        rarity_score: 0.8,
+    },
+    CargoSubtype {
+        code: "spices",
+        name: "spices",
+        name_zh: "香料",
+        category: CargoCategory::LuxuryGoods,
+        origin_regions: vec!["Southeast Asia", "India", "Moluccas"],
+        tech_requirement: 0.3,
+        rarity_score: 0.75,
+    },
+    CargoSubtype {
+        code: "spice",
+        name: "spice",
+        name_zh: "香料",
+        category: CargoCategory::LuxuryGoods,
+        origin_regions: vec!["Southeast Asia", "India"],
+        tech_requirement: 0.3,
+        rarity_score: 0.75,
+    },
+    CargoSubtype {
+        code: "iron_ore",
+        name: "iron_ore",
+        name_zh: "铁矿石",
+        category: CargoCategory::RawMaterials,
+        origin_regions: vec!["Mediterranean", "Middle East"],
+        tech_requirement: 0.2,
+        rarity_score: 0.3,
+    },
+    CargoSubtype {
+        code: "grain",
+        name: "grain",
+        name_zh: "粮食",
+        category: CargoCategory::StapleFoods,
+        origin_regions: vec!["Egypt", "Black Sea", "Sicily"],
+        tech_requirement: 0.1,
+        rarity_score: 0.1,
+    },
+    CargoSubtype {
+        code: "tin",
+        name: "tin",
+        name_zh: "锡",
+        category: CargoCategory::StrategicMaterials,
+        origin_regions: vec!["Britain", "Cornwall", "Malay"],
+        tech_requirement: 0.4,
+        rarity_score: 0.6,
+    },
+    CargoSubtype {
+        code: "tea",
+        name: "tea",
+        name_zh: "茶叶",
+        category: CargoCategory::LuxuryGoods,
+        origin_regions: vec!["China", "India", "Assam"],
+        tech_requirement: 0.4,
+        rarity_score: 0.65,
+    },
+    CargoSubtype {
+        code: "cotton",
+        name: "cotton",
+        name_zh: "棉花",
+        category: CargoCategory::RawMaterials,
+        origin_regions: vec!["India", "Egypt", "Persia"],
+        tech_requirement: 0.2,
+        rarity_score: 0.35,
+    },
+    CargoSubtype {
+        code: "timber",
+        name: "timber",
+        name_zh: "木材",
+        category: CargoCategory::RawMaterials,
+        origin_regions: vec!["Black Sea", "Baltic", "Levant"],
+        tech_requirement: 0.1,
+        rarity_score: 0.2,
+    },
+    CargoSubtype {
+        code: "wine",
+        name: "wine",
+        name_zh: "葡萄酒",
+        category: CargoCategory::LuxuryGoods,
+        origin_regions: vec!["Greece", "Italy", "Gaul"],
+        tech_requirement: 0.35,
+        rarity_score: 0.45,
+    },
+    CargoSubtype {
+        code: "olive_oil",
+        name: "olive_oil",
+        name_zh: "橄榄油",
+        category: CargoCategory::StapleFoods,
+        origin_regions: vec!["Mediterranean", "Greece", "Iberia"],
+        tech_requirement: 0.25,
+        rarity_score: 0.25,
+    },
+    CargoSubtype {
+        code: "copper",
+        name: "copper",
+        name_zh: "铜",
+        category: CargoCategory::StrategicMaterials,
+        origin_regions: vec!["Cyprus", "Anatolia", "Arabia"],
+        tech_requirement: 0.45,
+        rarity_score: 0.55,
+    },
+    CargoSubtype {
+        code: "silver",
+        name: "silver",
+        name_zh: "白银",
+        category: CargoCategory::LuxuryGoods,
+        origin_regions: vec!["Spain", "Anatolia", "Greece"],
+        tech_requirement: 0.6,
+        rarity_score: 0.85,
+    },
+    CargoSubtype {
+        code: "gold",
+        name: "gold",
+        name_zh: "黄金",
+        category: CargoCategory::LuxuryGoods,
+        origin_regions: vec!["Nubia", "Arabia", "India"],
+        tech_requirement: 0.7,
+        rarity_score: 0.95,
+    },
+    CargoSubtype {
+        code: "ivory",
+        name: "ivory",
+        name_zh: "象牙",
+        category: CargoCategory::LuxuryGoods,
+        origin_regions: vec!["Africa", "India"],
+        tech_requirement: 0.3,
+        rarity_score: 0.9,
+    },
+    CargoSubtype {
+        code: "relics",
+        name: "relics",
+        name_zh: "文物圣物",
+        category: CargoCategory::CulturalRelics,
+        origin_regions: vec!["Rome", "Constantinople", "Jerusalem"],
+        tech_requirement: 0.5,
+        rarity_score: 1.0,
+    },
+    CargoSubtype {
+        code: "paper",
+        name: "paper",
+        name_zh: "纸张",
+        category: CargoCategory::ManufacturedGoods,
+        origin_regions: vec!["China", "Samarkand", "Baghdad"],
+        tech_requirement: 0.65,
+        rarity_score: 0.5,
+    },
+    CargoSubtype {
+        code: "glass",
+        name: "glass",
+        name_zh: "玻璃",
+        category: CargoCategory::ManufacturedGoods,
+        origin_regions: vec!["Phoenicia", "Egypt", "Syria"],
+        tech_requirement: 0.6,
+        rarity_score: 0.6,
+    },
+    CargoSubtype {
+        code: "salt",
+        name: "salt",
+        name_zh: "盐",
+        category: CargoCategory::StapleFoods,
+        origin_regions: vec!["North Africa", "Mediterranean", "India"],
+        tech_requirement: 0.15,
+        rarity_score: 0.4,
+    },
+];
+
+pub fn classify_cargo_type(cargo_type: &str) -> Option<&'static CargoSubtype> {
+    let lower = cargo_type.to_lowercase();
+    for subtype in CARGO_HIERARCHY {
+        if lower == subtype.code.to_lowercase()
+            || lower == subtype.name.to_lowercase()
+            || lower.contains(subtype.code)
+            || lower.contains(subtype.name)
+            || lower.contains(subtype.name_zh)
+        {
+            return Some(subtype);
+        }
+    }
+    None
+}
+
+pub fn compute_layered_spread_paths(
+    graph: &HierarchicalSpreadGraph,
+    cargo_type: &str,
+) -> Vec<(i32, i32, f64, String)> {
+    let mut results = Vec::new();
+    let subtype = classify_cargo_type(cargo_type);
+    let category = subtype.as_ref().map(|s| s.category.clone());
+
+    let working_graph = if let Some(ref st) = subtype {
+        graph.by_subtype(st.code).unwrap_or(graph.base_graph())
+    } else {
+        graph.base_graph()
+    };
+
+    let (dist_filter, weight_multiplier) = match &category {
+        Some(CargoCategory::LuxuryGoods) => (None, 1.5),
+        Some(CargoCategory::StapleFoods) => (Some(1500.0), 0.6),
+        Some(CargoCategory::RawMaterials) => (None, 0.8),
+        Some(CargoCategory::ManufacturedGoods) => (None, 1.2),
+        Some(CargoCategory::CulturalRelics) => (None, 2.0),
+        Some(CargoCategory::StrategicMaterials) => (Some(3000.0), 1.0),
+        None => (None, 1.0),
+    };
+
+    let origins = working_graph.find_origin_ports();
+    for origin in &origins {
+        for (from, to, weight) in working_graph.edges() {
+            let adjusted_weight = weight * weight_multiplier;
+            if let Some(max_km) = dist_filter {
+                if let (Some(p1), Some(p2)) = (working_graph.get_port(from), working_graph.get_port(to))
+                {
+                    let lat1 = p1.lat.unwrap_or(0.0);
+                    let lon1 = p1.lon.unwrap_or(0.0);
+                    let lat2 = p2.lat.unwrap_or(0.0);
+                    let lon2 = p2.lon.unwrap_or(0.0);
+                    let dist = TechDiffusionSimulator::haversine_distance_km(lat1, lon1, lat2, lon2);
+                    if dist > max_km {
+                        continue;
+                    }
+                }
+            }
+            let layer = category.as_ref().map(|c| c.name().to_string()).unwrap_or_default();
+            results.push((from, to, adjusted_weight, layer));
+        }
+    }
+
+    results
 }
 
 #[cfg(test)]

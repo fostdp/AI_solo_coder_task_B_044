@@ -534,6 +534,7 @@ impl GrangerCausalityTest {
     }
 }
 
+#[derive(Clone)]
 struct PanelDataPoint {
     year: i32,
     total_flow: f64,
@@ -585,9 +586,9 @@ fn build_panel_data(
         let war_count = *war_counts.get(&flow.year).unwrap_or(&0) as f64;
         let regime_changes = *regime_counts.get(&flow.year).unwrap_or(&0) as f64;
 
-        let avg_temperature = climate.and_then(|c| c.avg_temperature).unwrap_or(0.0);
-        let storm_frequency = climate.and_then(|c| c.storm_frequency).unwrap_or(0.0);
-        let nao_index = climate.and_then(|c| c.nao_index).unwrap_or(0.0);
+        let avg_temperature = climate.and_then(|c| c.avg_temperature).unwrap_or(f64::NAN);
+        let storm_frequency = climate.and_then(|c| c.storm_frequency).unwrap_or(f64::NAN);
+        let nao_index = climate.and_then(|c| c.nao_index).unwrap_or(f64::NAN);
 
         points.push(PanelDataPoint {
             year: flow.year,
@@ -653,10 +654,12 @@ fn run_panel_regression_for_port(
         return None;
     }
 
-    let points = build_panel_data(flows, climate_map, war_counts, regime_counts);
+    let mut points = build_panel_data(flows, climate_map, war_counts, regime_counts);
     if points.len() < min_obs {
         return None;
     }
+
+    fill_missing_with_fallback(&mut points);
 
     let (x, y) = build_design_matrix(&points);
     let model = PanelRegression::fit(&x, &y)?;
@@ -726,10 +729,12 @@ fn run_granger_tests_for_port(
         return results;
     }
 
-    let points = build_panel_data(flows, climate_map, war_counts, regime_counts);
+    let mut points = build_panel_data(flows, climate_map, war_counts, regime_counts);
     if points.len() < min_obs {
         return results;
     }
+
+    fill_missing_with_fallback(&mut points);
 
     let y: Vec<f64> = points.iter().map(|p| p.total_flow).collect();
 
@@ -985,6 +990,550 @@ pub struct RiseFallQuery {
     pub year_end: Option<i32>,
     pub port_id: Option<i32>,
     pub region: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MissingDataReport {
+    pub total_observations: usize,
+    pub missing_by_variable: Vec<(String, usize, f64)>,
+    pub missing_patterns: Vec<(Vec<bool>, usize)>,
+    pub overall_missing_rate: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SensitivityAnalysisResult {
+    pub coefficient_ranges: Vec<(String, f64, f64)>,
+    pub se_ranges: Vec<(String, f64, f64)>,
+    pub pooled_coefficients: Vec<(String, f64)>,
+    pub pooled_standard_errors: Vec<(String, f64)>,
+    pub is_stable: bool,
+    pub max_coefficient_variation: f64,
+}
+
+pub struct MultipleImputer {
+    m: usize,
+    max_iterations: usize,
+    seed: u64,
+}
+
+impl MultipleImputer {
+    pub fn new(m: usize, max_iterations: usize, seed: u64) -> Self {
+        Self {
+            m,
+            max_iterations,
+            seed,
+        }
+    }
+
+    fn default() -> Self {
+        Self {
+            m: 5,
+            max_iterations: 10,
+            seed: 42,
+        }
+    }
+
+    pub fn analyze_missing(&self, points: &[PanelDataPoint]) -> MissingDataReport {
+        let n = points.len();
+        let var_names = [
+            "total_flow",
+            "avg_temperature",
+            "storm_frequency",
+            "nao_index",
+            "war_count",
+            "regime_changes",
+            "trade_connections",
+            "cargo_diversity",
+            "storm_rate",
+        ];
+
+        let extractors: [fn(&PanelDataPoint) -> f64; 9] = [
+            |p| p.total_flow,
+            |p| p.avg_temperature,
+            |p| p.storm_frequency,
+            |p| p.nao_index,
+            |p| p.war_count,
+            |p| p.regime_changes,
+            |p| p.trade_connections,
+            |p| p.cargo_diversity,
+            |p| p.storm_rate,
+        ];
+
+        let mut missing_by_variable = Vec::new();
+        let mut total_missing = 0usize;
+
+        for (i, name) in var_names.iter().enumerate() {
+            let count = points.iter().filter(|p| extractors[i](p).is_nan()).count();
+            let rate = if n > 0 { count as f64 / n as f64 } else { 0.0 };
+            missing_by_variable.push((name.to_string(), count, rate));
+            total_missing += count;
+        }
+
+        let mut pattern_counts: HashMap<Vec<bool>, usize> = HashMap::new();
+        for p in points {
+            let pattern = vec![
+                p.total_flow.is_nan(),
+                p.avg_temperature.is_nan(),
+                p.storm_frequency.is_nan(),
+                p.nao_index.is_nan(),
+                p.war_count.is_nan(),
+                p.regime_changes.is_nan(),
+                p.trade_connections.is_nan(),
+                p.cargo_diversity.is_nan(),
+                p.storm_rate.is_nan(),
+            ];
+            *pattern_counts.entry(pattern).or_insert(0) += 1;
+        }
+
+        let mut missing_patterns: Vec<(Vec<bool>, usize)> = pattern_counts.into_iter().collect();
+        missing_patterns.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let overall_missing_rate = if n > 0 {
+            total_missing as f64 / (n as f64 * var_names.len() as f64)
+        } else {
+            0.0
+        };
+
+        MissingDataReport {
+            total_observations: n,
+            missing_by_variable,
+            missing_patterns,
+            overall_missing_rate,
+        }
+    }
+
+    pub fn impute(&self, points: &[PanelDataPoint]) -> Vec<Vec<PanelDataPoint>> {
+        let n = points.len();
+        if n == 0 {
+            return vec![Vec::new(); self.m];
+        }
+
+        let mut result = Vec::with_capacity(self.m);
+        let default_imputer = Self::default();
+
+        for dataset_idx in 0..self.m {
+            let mut imputed: Vec<PanelDataPoint> = points.to_vec();
+            let seed_offset = (self.seed as u128).wrapping_add(dataset_idx as u128);
+
+            Self::fill_with_column_means(&mut imputed);
+
+            for _ in 0..self.max_iterations {
+                Self::mice_iteration(&mut imputed, seed_offset);
+            }
+
+            result.push(imputed);
+        }
+
+        let _ = default_imputer;
+        result
+    }
+
+    fn fill_with_column_means(points: &mut [PanelDataPoint]) {
+        let n = points.len();
+        if n == 0 {
+            return;
+        }
+
+        let means = Self::compute_column_means(points);
+
+        for p in points.iter_mut() {
+            if p.avg_temperature.is_nan() {
+                p.avg_temperature = means.0;
+            }
+            if p.storm_frequency.is_nan() {
+                p.storm_frequency = means.1;
+            }
+            if p.nao_index.is_nan() {
+                p.nao_index = means.2;
+            }
+            if p.total_flow.is_nan() {
+                p.total_flow = means.3;
+            }
+            if p.war_count.is_nan() {
+                p.war_count = means.4;
+            }
+            if p.regime_changes.is_nan() {
+                p.regime_changes = means.5;
+            }
+            if p.trade_connections.is_nan() {
+                p.trade_connections = means.6;
+            }
+            if p.cargo_diversity.is_nan() {
+                p.cargo_diversity = means.7;
+            }
+            if p.storm_rate.is_nan() {
+                p.storm_rate = means.8;
+            }
+        }
+    }
+
+    fn compute_column_means(
+        points: &[PanelDataPoint],
+    ) -> (f64, f64, f64, f64, f64, f64, f64, f64, f64) {
+        let mut sums = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        let mut counts = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+
+        for p in points {
+            if !p.avg_temperature.is_nan() {
+                sums.0 += p.avg_temperature;
+                counts.0 += 1;
+            }
+            if !p.storm_frequency.is_nan() {
+                sums.1 += p.storm_frequency;
+                counts.1 += 1;
+            }
+            if !p.nao_index.is_nan() {
+                sums.2 += p.nao_index;
+                counts.2 += 1;
+            }
+            if !p.total_flow.is_nan() {
+                sums.3 += p.total_flow;
+                counts.3 += 1;
+            }
+            if !p.war_count.is_nan() {
+                sums.4 += p.war_count;
+                counts.4 += 1;
+            }
+            if !p.regime_changes.is_nan() {
+                sums.5 += p.regime_changes;
+                counts.5 += 1;
+            }
+            if !p.trade_connections.is_nan() {
+                sums.6 += p.trade_connections;
+                counts.6 += 1;
+            }
+            if !p.cargo_diversity.is_nan() {
+                sums.7 += p.cargo_diversity;
+                counts.7 += 1;
+            }
+            if !p.storm_rate.is_nan() {
+                sums.8 += p.storm_rate;
+                counts.8 += 1;
+            }
+        }
+
+        (
+            if counts.0 > 0 { sums.0 / counts.0 as f64 } else { 0.0 },
+            if counts.1 > 0 { sums.1 / counts.1 as f64 } else { 0.0 },
+            if counts.2 > 0 { sums.2 / counts.2 as f64 } else { 0.0 },
+            if counts.3 > 0 { sums.3 / counts.3 as f64 } else { 0.0 },
+            if counts.4 > 0 { sums.4 / counts.4 as f64 } else { 0.0 },
+            if counts.5 > 0 { sums.5 / counts.5 as f64 } else { 0.0 },
+            if counts.6 > 0 { sums.6 / counts.6 as f64 } else { 0.0 },
+            if counts.7 > 0 { sums.7 / counts.7 as f64 } else { 0.0 },
+            if counts.8 > 0 { sums.8 / counts.8 as f64 } else { 0.0 },
+        )
+    }
+
+    fn mice_iteration(points: &mut [PanelDataPoint], _seed_offset: u128) {
+        let n = points.len();
+        if n < 3 {
+            return;
+        }
+
+        let target_indices: [usize; 9] = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+        let extractors: [fn(&PanelDataPoint) -> f64; 9] = [
+            |p| p.total_flow,
+            |p| p.avg_temperature,
+            |p| p.storm_frequency,
+            |p| p.nao_index,
+            |p| p.war_count,
+            |p| p.regime_changes,
+            |p| p.trade_connections,
+            |p| p.cargo_diversity,
+            |p| p.storm_rate,
+        ];
+
+        for target_idx in target_indices.iter() {
+            let mut x_matrix = Vec::with_capacity(n);
+            let mut y_vec = Vec::with_capacity(n);
+            let mut missing_positions = Vec::new();
+
+            for (i, p) in points.iter().enumerate() {
+                let y_val = extractors[*target_idx](p);
+                if y_val.is_nan() {
+                    missing_positions.push(i);
+                    continue;
+                }
+
+                let mut row = vec![1.0];
+                for (j, ext) in extractors.iter().enumerate() {
+                    if j != *target_idx {
+                        let v = ext(p);
+                        row.push(if v.is_nan() { 0.0 } else { v });
+                    }
+                }
+                x_matrix.push(row);
+                y_vec.push(y_val);
+            }
+
+            if missing_positions.is_empty() || x_matrix.len() < 3 {
+                continue;
+            }
+
+            if let Some(model) = PanelRegression::fit(&x_matrix, &y_vec) {
+                for &pos in &missing_positions {
+                    let mut row = vec![1.0];
+                    for (j, ext) in extractors.iter().enumerate() {
+                        if j != *target_idx {
+                            let v = ext(&points[pos]);
+                            row.push(if v.is_nan() { 0.0 } else { v });
+                        }
+                    }
+
+                    let mut pred = 0.0;
+                    for (k, coef) in model.coefficients().iter().enumerate() {
+                        if k < row.len() {
+                            pred += coef * row[k];
+                        }
+                    }
+
+                    match *target_idx {
+                        0 => points[pos].total_flow = pred,
+                        1 => points[pos].avg_temperature = pred,
+                        2 => points[pos].storm_frequency = pred,
+                        3 => points[pos].nao_index = pred,
+                        4 => points[pos].war_count = pred,
+                        5 => points[pos].regime_changes = pred,
+                        6 => points[pos].trade_connections = pred,
+                        7 => points[pos].cargo_diversity = pred,
+                        8 => points[pos].storm_rate = pred,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn run_sensitivity_analysis(
+    imputed_datasets: &[Vec<PanelDataPoint>],
+) -> Option<SensitivityAnalysisResult> {
+    if imputed_datasets.is_empty() {
+        return None;
+    }
+
+    let var_names_full = [
+        "intercept",
+        "avg_temperature",
+        "storm_frequency",
+        "nao_index",
+        "war_count",
+        "regime_changes",
+        "trade_connections",
+        "cargo_diversity",
+        "storm_rate",
+    ];
+
+    let mut all_coefficients: Vec<Vec<f64>> = Vec::new();
+    let mut all_standard_errors: Vec<Vec<f64>> = Vec::new();
+
+    for dataset in imputed_datasets {
+        if dataset.len() < 10 {
+            continue;
+        }
+        let (x, y) = build_design_matrix(dataset);
+        if let Some(model) = PanelRegression::fit(&x, &y) {
+            all_coefficients.push(model.coefficients().to_vec());
+            all_standard_errors.push(model.standard_errors().to_vec());
+        }
+    }
+
+    if all_coefficients.is_empty() {
+        return None;
+    }
+
+    let n_vars = all_coefficients[0].len();
+    let m = all_coefficients.len() as f64;
+
+    let mut coefficient_ranges = Vec::with_capacity(n_vars);
+    let mut se_ranges = Vec::with_capacity(n_vars);
+    let mut pooled_coefficients = Vec::with_capacity(n_vars);
+    let mut pooled_standard_errors = Vec::with_capacity(n_vars);
+    let mut max_cv = 0.0f64;
+
+    for var_idx in 0..n_vars {
+        let coefs: Vec<f64> = all_coefficients.iter().map(|c| c[var_idx]).collect();
+        let ses: Vec<f64> = all_standard_errors.iter().map(|s| s[var_idx]).collect();
+
+        let min_coef = coefs.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_coef = coefs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let min_se = ses.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_se = ses.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+        let mean_coef = coefs.iter().sum::<f64>() / m;
+        let mean_se = ses.iter().sum::<f64>() / m;
+
+        let coef_variance = coefs.iter().map(|c| (c - mean_coef).powi(2)).sum::<f64>() / (m - 1.0).max(1.0);
+        let between_var = (1.0 + 1.0 / m) * coef_variance;
+        let within_var = mean_se.powi(2);
+        let total_var = within_var + between_var;
+        let pooled_se = total_var.sqrt();
+
+        let cv = if mean_coef.abs() > 1e-15 {
+            coef_variance.sqrt() / mean_coef.abs()
+        } else {
+            0.0
+        };
+        if cv > max_cv {
+            max_cv = cv;
+        }
+
+        let name = if var_idx < var_names_full.len() {
+            var_names_full[var_idx].to_string()
+        } else {
+            format!("var_{}", var_idx)
+        };
+
+        coefficient_ranges.push((name.clone(), min_coef, max_coef));
+        se_ranges.push((name.clone(), min_se, max_se));
+        pooled_coefficients.push((name.clone(), mean_coef));
+        pooled_standard_errors.push((name, pooled_se));
+    }
+
+    let is_stable = max_cv < 0.5;
+
+    Some(SensitivityAnalysisResult {
+        coefficient_ranges,
+        se_ranges,
+        pooled_coefficients,
+        pooled_standard_errors,
+        is_stable,
+        max_coefficient_variation: max_cv,
+    })
+}
+
+fn fill_missing_with_fallback(points: &mut [PanelDataPoint]) {
+    if points.is_empty() {
+        return;
+    }
+
+    let means = MultipleImputer::compute_column_means(points);
+
+    for p in points.iter_mut() {
+        if p.avg_temperature.is_nan() {
+            p.avg_temperature = means.0;
+        }
+        if p.storm_frequency.is_nan() {
+            p.storm_frequency = means.1;
+        }
+        if p.nao_index.is_nan() {
+            p.nao_index = means.2;
+        }
+        if p.total_flow.is_nan() {
+            p.total_flow = means.3;
+        }
+        if p.war_count.is_nan() {
+            p.war_count = means.4;
+        }
+        if p.regime_changes.is_nan() {
+            p.regime_changes = means.5;
+        }
+        if p.trade_connections.is_nan() {
+            p.trade_connections = means.6;
+        }
+        if p.cargo_diversity.is_nan() {
+            p.cargo_diversity = means.7;
+        }
+        if p.storm_rate.is_nan() {
+            p.storm_rate = means.8;
+        }
+    }
+
+    let n = points.len();
+    for i in 0..n {
+        if i > 0 {
+            if points[i].avg_temperature.is_nan() {
+                points[i].avg_temperature = points[i - 1].avg_temperature;
+            }
+            if points[i].storm_frequency.is_nan() {
+                points[i].storm_frequency = points[i - 1].storm_frequency;
+            }
+            if points[i].nao_index.is_nan() {
+                points[i].nao_index = points[i - 1].nao_index;
+            }
+            if points[i].total_flow.is_nan() {
+                points[i].total_flow = points[i - 1].total_flow;
+            }
+            if points[i].war_count.is_nan() {
+                points[i].war_count = points[i - 1].war_count;
+            }
+            if points[i].regime_changes.is_nan() {
+                points[i].regime_changes = points[i - 1].regime_changes;
+            }
+            if points[i].trade_connections.is_nan() {
+                points[i].trade_connections = points[i - 1].trade_connections;
+            }
+            if points[i].cargo_diversity.is_nan() {
+                points[i].cargo_diversity = points[i - 1].cargo_diversity;
+            }
+            if points[i].storm_rate.is_nan() {
+                points[i].storm_rate = points[i - 1].storm_rate;
+            }
+        }
+    }
+
+    for i in (0..n).rev() {
+        if i < n - 1 {
+            if points[i].avg_temperature.is_nan() {
+                points[i].avg_temperature = points[i + 1].avg_temperature;
+            }
+            if points[i].storm_frequency.is_nan() {
+                points[i].storm_frequency = points[i + 1].storm_frequency;
+            }
+            if points[i].nao_index.is_nan() {
+                points[i].nao_index = points[i + 1].nao_index;
+            }
+            if points[i].total_flow.is_nan() {
+                points[i].total_flow = points[i + 1].total_flow;
+            }
+            if points[i].war_count.is_nan() {
+                points[i].war_count = points[i + 1].war_count;
+            }
+            if points[i].regime_changes.is_nan() {
+                points[i].regime_changes = points[i + 1].regime_changes;
+            }
+            if points[i].trade_connections.is_nan() {
+                points[i].trade_connections = points[i + 1].trade_connections;
+            }
+            if points[i].cargo_diversity.is_nan() {
+                points[i].cargo_diversity = points[i + 1].cargo_diversity;
+            }
+            if points[i].storm_rate.is_nan() {
+                points[i].storm_rate = points[i + 1].storm_rate;
+            }
+        }
+    }
+
+    for p in points.iter_mut() {
+        if p.avg_temperature.is_nan() {
+            p.avg_temperature = 0.0;
+        }
+        if p.storm_frequency.is_nan() {
+            p.storm_frequency = 0.0;
+        }
+        if p.nao_index.is_nan() {
+            p.nao_index = 0.0;
+        }
+        if p.total_flow.is_nan() {
+            p.total_flow = 0.0;
+        }
+        if p.war_count.is_nan() {
+            p.war_count = 0.0;
+        }
+        if p.regime_changes.is_nan() {
+            p.regime_changes = 0.0;
+        }
+        if p.trade_connections.is_nan() {
+            p.trade_connections = 0.0;
+        }
+        if p.cargo_diversity.is_nan() {
+            p.cargo_diversity = 0.0;
+        }
+        if p.storm_rate.is_nan() {
+            p.storm_rate = 0.0;
+        }
+    }
 }
 
 #[cfg(test)]
