@@ -631,3 +631,536 @@ pub async fn get_modern_comparison(
         heatmap_modern,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use maritime_common::config::ModernComparisonConfig;
+    use maritime_common::models::*;
+    use std::collections::HashMap;
+
+    fn create_test_ship(ship_type: &str, tonnage: f64, length: f64, speed: f64) -> ModernShip {
+        ModernShip {
+            id: 1,
+            ship_name: "Test Ship".to_string(),
+            mmsi: "123456789".to_string(),
+            ship_type: ship_type.to_string(),
+            gross_tonnage: tonnage,
+            length_m: length,
+            beam_m: 20.0,
+            max_speed_knots: speed,
+            flag: "Test".to_string(),
+        }
+    }
+
+    fn create_test_forecast(
+        wind_speed: f64,
+        wave_height: f64,
+        storm_prob: f64,
+    ) -> ModernWeatherForecast {
+        ModernWeatherForecast {
+            region: "test_region".to_string(),
+            wind_direction_deg: 180.0,
+            wind_speed_knots: wind_speed,
+            wave_height_m: wave_height,
+            current_direction_deg: 90.0,
+            current_speed_knots: 2.0,
+            storm_probability: storm_prob,
+            lat: 30.0,
+            lon: 120.0,
+        }
+    }
+
+    fn create_test_config() -> ModernComparisonConfig {
+        ModernComparisonConfig {
+            modern_risk_multiplier: 0.8,
+            tech_improvement_factor: 0.3,
+            weather_forecast_accuracy: 0.8,
+        }
+    }
+
+    fn approx_eq(a: f64, b: f64, epsilon: f64) -> bool {
+        (a - b).abs() < epsilon
+    }
+
+    mod ship_risk_factor_tests {
+        use super::*;
+
+        #[test]
+        fn test_ship_risk_factor_range() {
+            let ship_types = vec![
+                "container_ship",
+                "bulk_carrier",
+                "tanker",
+                "cargo_ship",
+                "passenger_ship",
+                "fishing_vessel",
+                "sailing_vessel",
+                "unknown_type",
+            ];
+            for st in ship_types {
+                let risk = ship_risk_factor(st);
+                assert!(risk >= 0.3, "{} risk {} should be >= 0.3", st, risk);
+                assert!(risk <= 1.0, "{} risk {} should be <= 1.0", st, risk);
+            }
+        }
+
+        #[test]
+        fn test_ship_risk_factor_ordering() {
+            let fishing = ship_risk_factor("fishing_vessel");
+            let bulk = ship_risk_factor("bulk_carrier");
+            let container = ship_risk_factor("container_ship");
+            assert!(fishing > bulk, "fishing ({}) > bulk ({})", fishing, bulk);
+            assert!(bulk > container, "bulk ({}) > container ({})", bulk, container);
+        }
+
+        #[test]
+        fn test_ship_risk_factor_unknown() {
+            let unknown = ship_risk_factor("unknown_ship_type");
+            let cargo = ship_risk_factor("cargo_ship");
+            assert_eq!(unknown, cargo);
+            assert_eq!(unknown, 0.75);
+        }
+
+        #[test]
+        fn test_dynamic_ship_risk_factor_large_ship_lower_risk() {
+            let ship_type = "cargo_ship";
+            let small_ship = create_test_ship(ship_type, 1000.0, 50.0, 10.0);
+            let large_ship = create_test_ship(ship_type, 80000.0, 300.0, 25.0);
+
+            let small_risk = dynamic_ship_risk_factor(Some(&small_ship), ship_type);
+            let large_risk = dynamic_ship_risk_factor(Some(&large_ship), ship_type);
+            let base_risk = dynamic_ship_risk_factor(None, ship_type);
+
+            assert!(large_risk < small_risk, "large ship risk ({}) < small ship risk ({})", large_risk, small_risk);
+            assert!(small_risk <= base_risk, "small ship risk ({}) <= base risk ({})", small_risk, base_risk);
+            assert!(large_risk <= base_risk, "large ship risk ({}) <= base risk ({})", large_risk, base_risk);
+        }
+
+        #[test]
+        fn test_dynamic_ship_risk_factor_none_degenerates() {
+            let ship_type = "cargo_ship";
+            let base = ship_risk_factor(ship_type);
+            let dynamic = dynamic_ship_risk_factor(None, ship_type);
+            assert_eq!(base, dynamic);
+        }
+
+        #[test]
+        fn test_dynamic_ship_risk_factor_min_bounded() {
+            let ship_type = "cargo_ship";
+            let huge_ship = create_test_ship(ship_type, 200000.0, 400.0, 35.0);
+            let risk = dynamic_ship_risk_factor(Some(&huge_ship), ship_type);
+            assert!(risk >= 0.3, "risk {} should be >= 0.3", risk);
+        }
+    }
+
+    mod risk_level_tests {
+        use super::*;
+
+        #[test]
+        fn test_risk_level_boundaries() {
+            assert_eq!(risk_level(0.7), "very_high");
+            assert_eq!(risk_level(0.5), "high");
+            assert_eq!(risk_level(0.3), "medium");
+            assert_eq!(risk_level(0.1), "low");
+        }
+
+        #[test]
+        fn test_risk_level_extremes() {
+            assert_eq!(risk_level(0.0), "very_low");
+            assert_eq!(risk_level(1.0), "very_high");
+        }
+
+        #[test]
+        fn test_risk_level_boundary_precise() {
+            assert_eq!(risk_level(0.6999999), "high");
+            assert_eq!(risk_level(0.7000001), "very_high");
+            assert_eq!(risk_level(0.4999999), "medium");
+            assert_eq!(risk_level(0.5000001), "high");
+            assert_eq!(risk_level(0.2999999), "low");
+            assert_eq!(risk_level(0.3000001), "medium");
+            assert_eq!(risk_level(0.0999999), "very_low");
+            assert_eq!(risk_level(0.1000001), "low");
+        }
+
+        #[test]
+        fn test_risk_level_mid_values() {
+            assert_eq!(risk_level(0.85), "very_high");
+            assert_eq!(risk_level(0.6), "high");
+            assert_eq!(risk_level(0.4), "medium");
+            assert_eq!(risk_level(0.2), "low");
+            assert_eq!(risk_level(0.05), "very_low");
+        }
+    }
+
+    mod bayesian_smooth_tests {
+        use super::*;
+
+        #[test]
+        fn test_bayesian_smooth_large_sample_weight() {
+            let raw = 0.8;
+            let global_avg = 0.3;
+            let result = bayesian_smooth(raw, global_avg, 1000.0, 1.0);
+            assert!(approx_eq(result, raw, 0.01), "result {} should be close to raw {}", result, raw);
+        }
+
+        #[test]
+        fn test_bayesian_smooth_large_prior_weight() {
+            let raw = 0.8;
+            let global_avg = 0.3;
+            let result = bayesian_smooth(raw, global_avg, 1.0, 1000.0);
+            assert!(approx_eq(result, global_avg, 0.01), "result {} should be close to prior {}", result, global_avg);
+        }
+
+        #[test]
+        fn test_bayesian_smooth_equal_weights() {
+            let raw = 0.8;
+            let global_avg = 0.4;
+            let result = bayesian_smooth(raw, global_avg, 5.0, 5.0);
+            let expected = (raw + global_avg) / 2.0;
+            assert!(approx_eq(result, expected, 1e-10), "result {} should be average {}", result, expected);
+        }
+
+        #[test]
+        fn test_bayesian_smooth_identical_values() {
+            let result = bayesian_smooth(0.5, 0.5, 3.0, 2.0);
+            assert!(approx_eq(result, 0.5, 1e-10));
+        }
+    }
+
+    mod modern_risk_tests {
+        use super::*;
+
+        #[test]
+        fn test_calculate_single_modern_risk_wind_increases_risk() {
+            let config = create_test_config();
+            let ship = create_test_ship("cargo_ship", 50000.0, 200.0, 18.0);
+            let global_avg = 0.3;
+
+            let low_wind = create_test_forecast(5.0, 2.0, 0.1);
+            let high_wind = create_test_forecast(25.0, 2.0, 0.1);
+
+            let low_risk = calculate_single_modern_risk(&low_wind, 10.0, Some(&ship), "cargo_ship", &config, global_avg);
+            let high_risk = calculate_single_modern_risk(&high_wind, 10.0, Some(&ship), "cargo_ship", &config, global_avg);
+
+            assert!(high_risk > low_risk, "high wind risk ({}) > low wind risk ({})", high_risk, low_risk);
+        }
+
+        #[test]
+        fn test_calculate_single_modern_risk_wave_increases_risk() {
+            let config = create_test_config();
+            let ship = create_test_ship("cargo_ship", 50000.0, 200.0, 18.0);
+            let global_avg = 0.3;
+
+            let low_wave = create_test_forecast(15.0, 1.0, 0.1);
+            let high_wave = create_test_forecast(15.0, 4.0, 0.1);
+
+            let low_risk = calculate_single_modern_risk(&low_wave, 10.0, Some(&ship), "cargo_ship", &config, global_avg);
+            let high_risk = calculate_single_modern_risk(&high_wave, 10.0, Some(&ship), "cargo_ship", &config, global_avg);
+
+            assert!(high_risk > low_risk, "high wave risk ({}) > low wave risk ({})", high_risk, low_risk);
+        }
+
+        #[test]
+        fn test_calculate_single_modern_risk_visibility_decreases_risk() {
+            let config = create_test_config();
+            let ship = create_test_ship("cargo_ship", 50000.0, 200.0, 18.0);
+            let global_avg = 0.3;
+            let forecast = create_test_forecast(15.0, 2.0, 0.1);
+
+            let low_vis_risk = calculate_single_modern_risk(&forecast, 1.0, Some(&ship), "cargo_ship", &config, global_avg);
+            let high_vis_risk = calculate_single_modern_risk(&forecast, 10.0, Some(&ship), "cargo_ship", &config, global_avg);
+
+            assert!(low_vis_risk > high_vis_risk, "low vis risk ({}) > high vis risk ({})", low_vis_risk, high_vis_risk);
+        }
+
+        #[test]
+        fn test_calculate_single_modern_risk_storm_prob_increases_risk() {
+            let config = create_test_config();
+            let ship = create_test_ship("cargo_ship", 50000.0, 200.0, 18.0);
+            let global_avg = 0.3;
+
+            let low_storm = create_test_forecast(15.0, 2.0, 0.1);
+            let high_storm = create_test_forecast(15.0, 2.0, 0.9);
+
+            let low_risk = calculate_single_modern_risk(&low_storm, 10.0, Some(&ship), "cargo_ship", &config, global_avg);
+            let high_risk = calculate_single_modern_risk(&high_storm, 10.0, Some(&ship), "cargo_ship", &config, global_avg);
+
+            assert!(high_risk > low_risk, "high storm risk ({}) > low storm risk ({})", high_risk, low_risk);
+        }
+
+        #[test]
+        fn test_calculate_single_modern_risk_bounded() {
+            let config = create_test_config();
+            let ship = create_test_ship("cargo_ship", 50000.0, 200.0, 18.0);
+
+            let extreme_good = create_test_forecast(0.0, 0.0, 0.0);
+            let extreme_bad = create_test_forecast(100.0, 20.0, 1.0);
+
+            let good_risk = calculate_single_modern_risk(&extreme_good, 20.0, Some(&ship), "cargo_ship", &config, 0.1);
+            let bad_risk = calculate_single_modern_risk(&extreme_bad, 0.0, Some(&ship), "cargo_ship", &config, 0.9);
+
+            assert!(good_risk >= 0.0, "good risk {} >= 0", good_risk);
+            assert!(good_risk <= 1.0, "good risk {} <= 1", good_risk);
+            assert!(bad_risk >= 0.0, "bad risk {} >= 0", bad_risk);
+            assert!(bad_risk <= 1.0, "bad risk {} <= 1", bad_risk);
+        }
+
+        #[test]
+        fn test_tech_improvement_reduces_risk() {
+            let ship = create_test_ship("cargo_ship", 50000.0, 200.0, 18.0);
+            let forecast = create_test_forecast(20.0, 3.0, 0.5);
+            let global_avg = 0.3;
+
+            let low_tech = ModernComparisonConfig {
+                modern_risk_multiplier: 0.8,
+                tech_improvement_factor: 0.1,
+                weather_forecast_accuracy: 0.8,
+            };
+            let high_tech = ModernComparisonConfig {
+                modern_risk_multiplier: 0.8,
+                tech_improvement_factor: 0.5,
+                weather_forecast_accuracy: 0.8,
+            };
+
+            let low_tech_risk = calculate_single_modern_risk(&forecast, 10.0, Some(&ship), "cargo_ship", &low_tech, global_avg);
+            let high_tech_risk = calculate_single_modern_risk(&forecast, 10.0, Some(&ship), "cargo_ship", &high_tech, global_avg);
+
+            assert!(high_tech_risk < low_tech_risk, "high tech risk ({}) < low tech risk ({})", high_tech_risk, low_tech_risk);
+        }
+    }
+
+    mod comparison_summary_tests {
+        use super::*;
+
+        #[test]
+        fn test_ancient_risk_greater_than_modern() {
+            let config = create_test_config();
+            let ship = create_test_ship("cargo_ship", 50000.0, 200.0, 18.0);
+            let global_avg = 0.2;
+
+            let mut ancient_scores: Vec<f64> = vec![0.6, 0.7, 0.8, 0.5];
+            let forecasts = vec![
+                create_test_forecast(10.0, 1.0, 0.2),
+                create_test_forecast(15.0, 2.0, 0.3),
+                create_test_forecast(20.0, 3.0, 0.4),
+                create_test_forecast(12.0, 1.5, 0.25),
+            ];
+
+            let avg_ancient: f64 = ancient_scores.iter().sum::<f64>() / ancient_scores.len() as f64;
+            let avg_modern: f64 = forecasts
+                .iter()
+                .map(|f| calculate_single_modern_risk(f, 10.0, Some(&ship), "cargo_ship", &config, global_avg))
+                .sum::<f64>()
+                / forecasts.len() as f64;
+
+            assert!(avg_ancient > avg_modern, "ancient ({}) > modern ({})", avg_ancient, avg_modern);
+        }
+
+        #[test]
+        fn test_risk_reduction_percentage_calculation() {
+            let avg_ancient = 0.8;
+            let avg_modern = 0.4;
+            let reduction_pct = if avg_ancient > 0.0 {
+                (avg_ancient - avg_modern) / avg_ancient * 100.0
+            } else {
+                0.0
+            };
+            assert!(approx_eq(reduction_pct, 50.0, 1e-10));
+        }
+
+        #[test]
+        fn test_risk_reduction_percentage_zero_ancient() {
+            let avg_ancient = 0.0;
+            let avg_modern = 0.2;
+            let reduction_pct = if avg_ancient > 0.0 {
+                (avg_ancient - avg_modern) / avg_ancient * 100.0
+            } else {
+                0.0
+            };
+            assert_eq!(reduction_pct, 0.0);
+        }
+
+        #[test]
+        fn test_correlation_in_range() {
+            let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+            let y_pos = vec![2.0, 4.0, 6.0, 8.0, 10.0];
+            let y_neg = vec![10.0, 8.0, 6.0, 4.0, 2.0];
+
+            let corr_pos = pearson_correlation(&x, &y_pos);
+            let corr_neg = pearson_correlation(&x, &y_neg);
+
+            assert!(corr_pos >= -1.0 && corr_pos <= 1.0);
+            assert!(corr_neg >= -1.0 && corr_neg <= 1.0);
+            assert!(corr_pos > 0.0);
+            assert!(corr_neg < 0.0);
+        }
+
+        #[test]
+        fn test_high_risk_count() {
+            let risks = vec![0.1, 0.4, 0.2, 0.6, 0.35, 0.8];
+            let high_risk_count = risks.iter().filter(|&&r| r > 0.3).count() as i32;
+            assert_eq!(high_risk_count, 4);
+        }
+
+        #[test]
+        fn test_pearson_correlation_perfect_positive() {
+            let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+            let y = vec![2.0, 4.0, 6.0, 8.0, 10.0];
+            let corr = pearson_correlation(&x, &y);
+            assert!(approx_eq(corr, 1.0, 1e-6));
+        }
+
+        #[test]
+        fn test_pearson_correlation_perfect_negative() {
+            let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+            let y = vec![10.0, 8.0, 6.0, 4.0, 2.0];
+            let corr = pearson_correlation(&x, &y);
+            assert!(approx_eq(corr, -1.0, 1e-6));
+        }
+
+        #[test]
+        fn test_pearson_correlation_short_input() {
+            let x = vec![1.0];
+            let y = vec![2.0];
+            let corr = pearson_correlation(&x, &y);
+            assert_eq!(corr, 0.0);
+
+            let x_empty: Vec<f64> = vec![];
+            let y_empty: Vec<f64> = vec![];
+            let corr_empty = pearson_correlation(&x_empty, &y_empty);
+            assert_eq!(corr_empty, 0.0);
+        }
+    }
+
+    mod distance_tests {
+        use super::*;
+
+        #[test]
+        fn test_haversine_distance_same_point() {
+            let dist = haversine_distance_km(30.0, 120.0, 30.0, 120.0);
+            assert!(approx_eq(dist, 0.0, 1e-6));
+        }
+
+        #[test]
+        fn test_haversine_distance_known_distance() {
+            let dist = haversine_distance_km(0.0, 0.0, 0.0, 1.0);
+            let expected = 6371.0 * 1.0_f64.to_radians();
+            assert!(approx_eq(dist, expected, 1.0));
+        }
+
+        #[test]
+        fn test_route_offset_distance_empty() {
+            let route1: Vec<Vec<f64>> = vec![];
+            let route2 = vec![vec![120.0, 30.0]];
+            assert_eq!(route_offset_distance(&route1, &route2), 0.0);
+            assert_eq!(route_offset_distance(&route2, &route1), 0.0);
+        }
+
+        #[test]
+        fn test_route_offset_distance_identical() {
+            let route = vec![
+                vec![120.0, 30.0],
+                vec![121.0, 31.0],
+            ];
+            let dist = route_offset_distance(&route, &route);
+            assert!(approx_eq(dist, 0.0, 1e-6));
+        }
+    }
+
+    mod edge_case_tests {
+        use super::*;
+
+        #[test]
+        fn test_empty_input_returns_default() {
+            let region_risks: HashMap<String, Vec<f64>> = HashMap::new();
+            let most_dangerous = find_most_dangerous_region(&region_risks);
+            assert_eq!(most_dangerous, "unknown");
+
+            let empty_risks: Vec<StormRiskResult> = vec![];
+            let port_map: HashMap<i32, String> = HashMap::new();
+            let result = compute_region_risks(&empty_risks, &port_map);
+            assert!(result.is_empty());
+        }
+
+        #[test]
+        fn test_wind_speed_zero() {
+            let config = create_test_config();
+            let ship = create_test_ship("cargo_ship", 50000.0, 200.0, 18.0);
+            let forecast = create_test_forecast(0.0, 2.0, 0.1);
+            let risk = calculate_single_modern_risk(&forecast, 10.0, Some(&ship), "cargo_ship", &config, 0.2);
+            assert!(risk >= 0.0 && risk <= 1.0);
+        }
+
+        #[test]
+        fn test_wind_speed_extreme() {
+            let config = create_test_config();
+            let ship = create_test_ship("cargo_ship", 50000.0, 200.0, 18.0);
+            let forecast = create_test_forecast(1000.0, 2.0, 0.1);
+            let risk = calculate_single_modern_risk(&forecast, 10.0, Some(&ship), "cargo_ship", &config, 0.2);
+            assert!(risk >= 0.0 && risk <= 1.0);
+        }
+
+        #[test]
+        fn test_visibility_zero() {
+            let config = create_test_config();
+            let ship = create_test_ship("cargo_ship", 50000.0, 200.0, 18.0);
+            let forecast = create_test_forecast(15.0, 2.0, 0.1);
+            let risk = calculate_single_modern_risk(&forecast, 0.0, Some(&ship), "cargo_ship", &config, 0.2);
+            assert!(risk >= 0.0 && risk <= 1.0);
+        }
+
+        #[test]
+        fn test_visibility_extreme_high() {
+            let config = create_test_config();
+            let ship = create_test_ship("cargo_ship", 50000.0, 200.0, 18.0);
+            let forecast = create_test_forecast(15.0, 2.0, 0.1);
+            let risk = calculate_single_modern_risk(&forecast, 1000.0, Some(&ship), "cargo_ship", &config, 0.2);
+            assert!(risk >= 0.0 && risk <= 1.0);
+        }
+
+        #[test]
+        fn test_storm_probability_clamped() {
+            let config = create_test_config();
+            let ship = create_test_ship("cargo_ship", 50000.0, 200.0, 18.0);
+
+            let neg_storm = create_test_forecast(15.0, 2.0, -0.5);
+            let over_storm = create_test_forecast(15.0, 2.0, 1.5);
+
+            let neg_risk = calculate_single_modern_risk(&neg_storm, 10.0, Some(&ship), "cargo_ship", &config, 0.2);
+            let over_risk = calculate_single_modern_risk(&over_storm, 10.0, Some(&ship), "cargo_ship", &config, 0.2);
+
+            assert!(neg_risk >= 0.0 && neg_risk <= 1.0);
+            assert!(over_risk >= 0.0 && over_risk <= 1.0);
+            assert!(over_risk > neg_risk);
+        }
+
+        #[test]
+        fn test_find_most_dangerous_region_empty_values() {
+            let mut region_risks: HashMap<String, Vec<f64>> = HashMap::new();
+            region_risks.insert("north".to_string(), vec![]);
+            region_risks.insert("south".to_string(), vec![0.5, 0.6]);
+            let most_dangerous = find_most_dangerous_region(&region_risks);
+            assert_eq!(most_dangerous, "south");
+        }
+
+        #[test]
+        fn test_compute_region_risks_unknown_region() {
+            let risks = vec![StormRiskResult {
+                departure_port_id: 999,
+                arrival_port_id: 888,
+                departure_port_name: "Test".to_string(),
+                arrival_port_name: "Test2".to_string(),
+                season: "summer".to_string(),
+                risk_score: 0.5,
+                sample_size: 10,
+                model_type: "test".to_string(),
+                confidence: 0.8,
+            }];
+            let port_map: HashMap<i32, String> = HashMap::new();
+            let result = compute_region_risks(&risks, &port_map);
+            assert!(result.contains_key("unknown"));
+            assert_eq!(result.get("unknown").unwrap().len(), 1);
+        }
+    }
+}

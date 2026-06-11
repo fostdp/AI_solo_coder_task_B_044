@@ -1107,3 +1107,559 @@ pub fn compare_routes(
         total_waypoints: optimized.route_points.len() as i32,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPSILON: f64 = 1e-6;
+
+    fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
+        (a - b).abs() < eps
+    }
+
+    fn test_config() -> RoutePlanningConfig {
+        RoutePlanningConfig {
+            grid_resolution_km: 50.0,
+            max_iterations: 10000,
+            current_weight: 1.0,
+            wind_weight: 0.5,
+            storm_risk_weight: 10.0,
+            distance_weight: 1.0,
+        }
+    }
+
+    fn make_route_result(points: Vec<Vec<f64>>, distance: f64, days: f64, risk: f64) -> RoutePlanningResult {
+        RoutePlanningResult {
+            departure_port_id: 1,
+            arrival_port_id: 2,
+            departure_port_name: "A".to_string(),
+            arrival_port_name: "B".to_string(),
+            season: "summer".to_string(),
+            ship_type: "trireme".to_string(),
+            method: "test".to_string(),
+            route_points: points,
+            distance_nautical_miles: distance,
+            estimated_days: days,
+            avg_speed_knots: 5.0,
+            storm_risk: risk,
+            historical_deviation_pct: 0.0,
+            historical_correlation: 0.0,
+        }
+    }
+
+    #[test]
+    fn test_deg_to_rad() {
+        assert!(approx_eq(deg_to_rad(0.0), 0.0, EPSILON));
+        assert!(approx_eq(deg_to_rad(90.0), std::f64::consts::PI / 2.0, EPSILON));
+        assert!(approx_eq(deg_to_rad(180.0), std::f64::consts::PI, EPSILON));
+        assert!(approx_eq(deg_to_rad(360.0), 2.0 * std::f64::consts::PI, EPSILON));
+    }
+
+    #[test]
+    fn test_rad_to_deg() {
+        assert!(approx_eq(rad_to_deg(0.0), 0.0, EPSILON));
+        assert!(approx_eq(rad_to_deg(std::f64::consts::PI / 2.0), 90.0, EPSILON));
+        assert!(approx_eq(rad_to_deg(std::f64::consts::PI), 180.0, EPSILON));
+        assert!(approx_eq(rad_to_deg(2.0 * std::f64::consts::PI), 360.0, EPSILON));
+    }
+
+    #[test]
+    fn test_haversine_same_location() {
+        let dist = haversine_distance(45.0, 10.0, 45.0, 10.0);
+        assert!(approx_eq(dist, 0.0, EPSILON));
+    }
+
+    #[test]
+    fn test_haversine_equator_lon_diff() {
+        let dist = haversine_distance(0.0, 0.0, 0.0, 1.0);
+        let expected_km = 111.0;
+        assert!(approx_eq(dist, expected_km, 2.0));
+    }
+
+    #[test]
+    fn test_haversine_north_south() {
+        let dist = haversine_distance(0.0, 0.0, 1.0, 0.0);
+        let expected_km = 111.0;
+        assert!(approx_eq(dist, expected_km, 2.0));
+    }
+
+    #[test]
+    fn test_haversine_distance_nm() {
+        let dist_km = haversine_distance(0.0, 0.0, 1.0, 0.0);
+        let dist_nm = haversine_distance_nm(0.0, 0.0, 1.0, 0.0);
+        assert!(approx_eq(dist_nm, dist_km * NAUTICAL_MILE_PER_KM, EPSILON));
+        assert!(dist_nm > 0.0);
+    }
+
+    #[test]
+    fn test_bearing_north() {
+        let brng = bearing(0.0, 0.0, 1.0, 0.0);
+        assert!(approx_eq(brng, 0.0, 0.5));
+    }
+
+    #[test]
+    fn test_bearing_east() {
+        let brng = bearing(0.0, 0.0, 0.0, 1.0);
+        assert!(approx_eq(brng, 90.0, 0.5));
+    }
+
+    #[test]
+    fn test_bearing_south() {
+        let brng = bearing(1.0, 0.0, 0.0, 0.0);
+        assert!(approx_eq(brng, 180.0, 0.5));
+    }
+
+    #[test]
+    fn test_bearing_west() {
+        let brng = bearing(0.0, 1.0, 0.0, 0.0);
+        assert!(approx_eq(brng, 270.0, 0.5));
+    }
+
+    #[test]
+    fn test_direction_to_vector_0_deg() {
+        let (sin, cos) = direction_to_vector(0.0);
+        assert!(approx_eq(sin, 0.0, EPSILON));
+        assert!(approx_eq(cos, 1.0, EPSILON));
+    }
+
+    #[test]
+    fn test_direction_to_vector_90_deg() {
+        let (sin, cos) = direction_to_vector(90.0);
+        assert!(approx_eq(sin, 1.0, EPSILON));
+        assert!(approx_eq(cos, 0.0, EPSILON));
+    }
+
+    #[test]
+    fn test_direction_to_vector_180_deg() {
+        let (sin, cos) = direction_to_vector(180.0);
+        assert!(approx_eq(sin, 0.0, EPSILON));
+        assert!(approx_eq(cos, -1.0, EPSILON));
+    }
+
+    #[test]
+    fn test_route_grid_new_bounds() {
+        let grid = RouteGrid::new(0.0, 10.0, 20.0, 30.0, 50.0);
+        assert!(approx_eq(grid.lat_min, 0.0, EPSILON));
+        assert!(approx_eq(grid.lat_max, 10.0, EPSILON));
+        assert!(approx_eq(grid.lon_min, 20.0, EPSILON));
+        assert!(approx_eq(grid.lon_max, 30.0, EPSILON));
+    }
+
+    #[test]
+    fn test_route_grid_min_steps() {
+        let grid = RouteGrid::new(0.0, 0.1, 0.0, 0.1, 1000.0);
+        assert!(grid.lat_steps >= 2);
+        assert!(grid.lon_steps >= 2);
+    }
+
+    #[test]
+    fn test_route_grid_cell_corners() {
+        let grid = RouteGrid::new(0.0, 10.0, 0.0, 10.0, 50.0);
+        let (i, j) = grid.lat_lon_to_idx(0.0, 0.0);
+        assert_eq!(i, 0);
+        assert_eq!(j, 0);
+
+        let (i, j) = grid.lat_lon_to_idx(10.0, 10.0);
+        assert_eq!(i, grid.lat_steps - 1);
+        assert_eq!(j, grid.lon_steps - 1);
+    }
+
+    #[test]
+    fn test_route_grid_clamp_outside() {
+        let grid = RouteGrid::new(0.0, 10.0, 0.0, 10.0, 50.0);
+        let (i, j) = grid.lat_lon_to_idx(-5.0, -5.0);
+        assert_eq!(i, 0);
+        assert_eq!(j, 0);
+
+        let (i, j) = grid.lat_lon_to_idx(15.0, 15.0);
+        assert_eq!(i, grid.lat_steps - 1);
+        assert_eq!(j, grid.lon_steps - 1);
+    }
+
+    #[test]
+    fn test_route_grid_idx_roundtrip() {
+        let grid = RouteGrid::new(0.0, 10.0, 0.0, 10.0, 50.0);
+        for i in 0..grid.lat_steps {
+            for j in 0..grid.lon_steps {
+                let (lat, lon) = grid.idx_to_lat_lon(i, j);
+                let (i2, j2) = grid.lat_lon_to_idx(lat, lon);
+                assert_eq!(i, i2);
+                assert_eq!(j, j2);
+            }
+        }
+    }
+
+    #[test]
+    fn test_route_grid_cell_at() {
+        let grid = RouteGrid::new(0.0, 10.0, 0.0, 10.0, 50.0);
+        let cell = grid.cell_at(0, 0);
+        assert!(cell.lat >= grid.lat_min - EPSILON);
+        assert!(cell.lon >= grid.lon_min - EPSILON);
+    }
+
+    #[test]
+    fn test_route_grid_cell_distance() {
+        let grid = RouteGrid::new(0.0, 10.0, 0.0, 10.0, 50.0);
+        let dist = grid.cell_distance_km(0, 0, 0, 0);
+        assert!(approx_eq(dist, 0.0, EPSILON));
+
+        let dist = grid.cell_distance_nm(0, 0, 1, 1);
+        assert!(dist > 0.0);
+    }
+
+    fn set_obstacle(grid: &mut RouteGrid, i: usize, j: usize) {
+        let cell = grid.cell_at_mut(i, j);
+        cell.storm_risk = 100.0;
+    }
+
+    #[test]
+    fn test_a_star_start_is_goal() {
+        let grid = RouteGrid::new(0.0, 5.0, 0.0, 5.0, 100.0);
+        let config = test_config();
+        let result = a_star_search(&grid, 0, 0, 0, 0, 5.0, 7.5, &config);
+        assert!(result.is_some());
+        let (path, cost) = result.unwrap();
+        assert_eq!(path.len(), 1);
+        assert_eq!(path[0], (0, 0));
+        assert!(approx_eq(cost, 0.0, EPSILON));
+    }
+
+    #[test]
+    fn test_a_star_straight_line_no_obstacles() {
+        let grid = RouteGrid::new(0.0, 2.0, 0.0, 0.0, 50.0);
+        let config = test_config();
+        let result = a_star_search(&grid, 0, 0, grid.lat_steps - 1, 0, 5.0, 7.5, &config);
+        assert!(result.is_some());
+        let (path, _cost) = result.unwrap();
+        assert!(path.len() >= 2);
+        assert_eq!(path[0], (0, 0));
+        assert_eq!(path[path.len() - 1], (grid.lat_steps - 1, 0));
+    }
+
+    #[test]
+    fn test_a_star_obstacle_detour() {
+        let mut grid = RouteGrid::new(0.0, 2.0, 0.0, 2.0, 50.0);
+        let mid_i = grid.lat_steps / 2;
+        let mid_j = grid.lon_steps / 2;
+        for j in 0..grid.lon_steps {
+            if j != mid_j {
+                set_obstacle(&mut grid, mid_i, j);
+            }
+        }
+        let config = test_config();
+        let result = a_star_search(&grid, 0, 0, grid.lat_steps - 1, 0, 5.0, 7.5, &config);
+        assert!(result.is_some());
+        let (path, _) = result.unwrap();
+        assert!(path.len() > 2);
+        assert_eq!(path[0], (0, 0));
+        assert_eq!(path[path.len() - 1], (grid.lat_steps - 1, 0));
+    }
+
+    #[test]
+    fn test_heuristic_admissibility() {
+        let grid = RouteGrid::new(0.0, 5.0, 0.0, 5.0, 50.0);
+        let config = test_config();
+        let max_speed = 7.5;
+        let base_speed = 5.0;
+
+        for i in 0..grid.lat_steps {
+            for j in 0..grid.lon_steps {
+                let h = heuristic(&grid, i, j, grid.lat_steps - 1, grid.lon_steps - 1, max_speed);
+                let result = a_star_search(&grid, i, j, grid.lat_steps - 1, grid.lon_steps - 1, base_speed, max_speed, &config);
+                if let Some((_, actual_cost)) = result {
+                    assert!(h <= actual_cost + EPSILON, "Heuristic overestimates: h={}, actual={}", h, actual_cost);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_a_star_open_set_push_pop() {
+        let mut open_set = AStarOpenSet::new();
+        assert!(open_set.is_empty());
+
+        open_set.push(RouteNode { f: 10.0, g: 5.0, h: 5.0, i: 0, j: 0 });
+        assert!(!open_set.is_empty());
+
+        let node = open_set.pop();
+        assert!(node.is_some());
+        assert_eq!(node.unwrap().g, 5.0);
+        assert!(open_set.is_empty());
+    }
+
+    #[test]
+    fn test_a_star_open_set_best_g() {
+        let mut open_set = AStarOpenSet::new();
+        open_set.push(RouteNode { f: 10.0, g: 5.0, h: 5.0, i: 0, j: 0 });
+        open_set.push(RouteNode { f: 8.0, g: 3.0, h: 5.0, i: 0, j: 0 });
+
+        assert_eq!(open_set.get_best_g(0, 0), Some(3.0));
+
+        let node = open_set.pop().unwrap();
+        assert_eq!(node.g, 3.0);
+    }
+
+    #[test]
+    fn test_compare_routes_same_route() {
+        let points = vec![
+            vec![0.0, 0.0],
+            vec![1.0, 0.0],
+            vec![2.0, 0.0],
+        ];
+        let route = make_route_result(points.clone(), 100.0, 5.0, 0.2);
+        let comparison = compare_routes(&route, Some(&route));
+        assert!(approx_eq(comparison.similarity_score, 1.0, EPSILON));
+        assert!(approx_eq(comparison.distance_diff_pct, 0.0, EPSILON));
+        assert!(approx_eq(comparison.time_diff_pct, 0.0, EPSILON));
+        assert!(approx_eq(comparison.risk_diff_pct, 0.0, EPSILON));
+    }
+
+    #[test]
+    fn test_compare_routes_historical_none() {
+        let points = vec![vec![0.0, 0.0], vec![1.0, 0.0]];
+        let route = make_route_result(points, 100.0, 5.0, 0.2);
+        let comparison = compare_routes(&route, None);
+        assert!(approx_eq(comparison.distance_diff_pct, 0.0, EPSILON));
+        assert!(approx_eq(comparison.time_diff_pct, 0.0, EPSILON));
+        assert!(approx_eq(comparison.risk_diff_pct, 0.0, EPSILON));
+        assert!(approx_eq(comparison.similarity_score, 0.0, EPSILON));
+        assert_eq!(comparison.waypoints_matched, 0);
+    }
+
+    #[test]
+    fn test_compare_routes_distance_diff() {
+        let points_a = vec![vec![0.0, 0.0], vec![2.0, 0.0]];
+        let points_b = vec![vec![0.0, 0.0], vec![1.0, 0.0]];
+        let route_a = make_route_result(points_a, 200.0, 10.0, 0.3);
+        let route_b = make_route_result(points_b, 100.0, 5.0, 0.2);
+
+        let comparison = compare_routes(&route_a, Some(&route_b));
+        assert!(approx_eq(comparison.distance_diff_pct, 100.0, EPSILON));
+        assert!(approx_eq(comparison.time_diff_pct, 100.0, EPSILON));
+        assert!(approx_eq(comparison.risk_diff_pct, 50.0, EPSILON));
+    }
+
+    #[test]
+    fn test_path_similarity_same_path() {
+        let route = vec![
+            vec![0.0, 0.0],
+            vec![1.0, 0.0],
+            vec![2.0, 0.0],
+            vec![3.0, 0.0],
+        ];
+        let score = path_similarity_score(&route, &route);
+        assert!(approx_eq(score, 1.0, EPSILON));
+    }
+
+    #[test]
+    fn test_path_similarity_very_different() {
+        let route_a = vec![
+            vec![0.0, 0.0],
+            vec![1.0, 0.0],
+            vec![2.0, 0.0],
+        ];
+        let route_b = vec![
+            vec![0.0, 10.0],
+            vec![1.0, 10.0],
+            vec![2.0, 10.0],
+        ];
+        let score = path_similarity_score(&route_a, &route_b);
+        assert!(score < 0.5);
+        assert!(score >= 0.0);
+    }
+
+    #[test]
+    fn test_path_similarity_partial_overlap() {
+        let route_a = vec![
+            vec![0.0, 0.0],
+            vec![1.0, 0.0],
+            vec![2.0, 0.0],
+            vec![3.0, 0.0],
+            vec![4.0, 0.0],
+        ];
+        let route_b = vec![
+            vec![1.0, 0.0],
+            vec![2.0, 0.0],
+            vec![3.0, 0.0],
+        ];
+        let score = path_similarity_score(&route_a, &route_b);
+        assert!(score > 0.0);
+        assert!(score < 1.0);
+    }
+
+    #[test]
+    fn test_total_distance_empty() {
+        let route: Vec<Vec<f64>> = Vec::new();
+        assert!(approx_eq(total_distance_nm(&route), 0.0, EPSILON));
+    }
+
+    #[test]
+    fn test_total_distance_single_point() {
+        let route = vec![vec![0.0, 0.0]];
+        assert!(approx_eq(total_distance_nm(&route), 0.0, EPSILON));
+    }
+
+    #[test]
+    fn test_total_distance_two_points() {
+        let route = vec![vec![0.0, 0.0], vec![1.0, 0.0]];
+        let dist = total_distance_nm(&route);
+        assert!(dist > 0.0);
+    }
+
+    #[test]
+    fn test_empty_path_similarity() {
+        let empty: Vec<Vec<f64>> = Vec::new();
+        let route = vec![vec![0.0, 0.0], vec![1.0, 0.0]];
+        let score = path_similarity_score(&empty, &route);
+        assert!(approx_eq(score, 0.0, EPSILON));
+
+        let score = path_similarity_score(&route, &empty);
+        assert!(approx_eq(score, 0.0, EPSILON));
+    }
+
+    #[test]
+    fn test_single_point_similarity() {
+        let single = vec![vec![0.0, 0.0]];
+        let route = vec![vec![0.0, 0.0], vec![1.0, 0.0]];
+        let score = path_similarity_score(&single, &route);
+        assert!(approx_eq(score, 0.0, EPSILON));
+    }
+
+    #[test]
+    fn test_frechet_distance_approx_empty() {
+        let empty: Vec<Vec<f64>> = Vec::new();
+        let route = vec![vec![0.0, 0.0]];
+        assert!(approx_eq(frechet_distance_approx(&empty, &route), 0.0, EPSILON));
+        assert!(approx_eq(frechet_distance_approx(&route, &empty), 0.0, EPSILON));
+    }
+
+    #[test]
+    fn test_average_distance_deviation_empty() {
+        let empty: Vec<Vec<f64>> = Vec::new();
+        let route = vec![vec![0.0, 0.0], vec![1.0, 0.0]];
+        assert!(approx_eq(average_distance_deviation(&empty, &route), 0.0, EPSILON));
+        assert!(approx_eq(average_distance_deviation(&route, &empty), 0.0, EPSILON));
+    }
+
+    #[test]
+    fn test_bilinear_interpolate_empty() {
+        let points: Vec<(f64, f64, f64)> = Vec::new();
+        assert!(approx_eq(bilinear_interpolate(&points, 0.0, 0.0), 0.0, EPSILON));
+    }
+
+    #[test]
+    fn test_bilinear_interpolate_single() {
+        let points = vec![(1.0, 2.0, 42.0)];
+        assert!(approx_eq(bilinear_interpolate(&points, 1.0, 2.0), 42.0, EPSILON));
+    }
+
+    #[test]
+    fn test_ship_base_speed() {
+        assert!(approx_eq(ship_base_speed("trireme"), 6.0, EPSILON));
+        assert!(approx_eq(ship_base_speed("galley"), 5.0, EPSILON));
+        assert!(approx_eq(ship_base_speed("unknown"), 5.0, EPSILON));
+    }
+
+    #[test]
+    fn test_ship_max_speed() {
+        assert!(approx_eq(ship_max_speed("trireme"), 9.0, EPSILON));
+        assert!(approx_eq(ship_max_speed("galley"), 7.5, EPSILON));
+    }
+
+    #[test]
+    fn test_speed_projection_on_heading() {
+        let proj = speed_projection_on_heading(10.0, 0.0, 0.0);
+        assert!(approx_eq(proj, 10.0, EPSILON));
+
+        let proj = speed_projection_on_heading(10.0, 90.0, 0.0);
+        assert!(approx_eq(proj, 0.0, 0.001));
+
+        let proj = speed_projection_on_heading(10.0, 180.0, 0.0);
+        assert!(approx_eq(proj, -10.0, EPSILON));
+    }
+
+    #[test]
+    fn test_populate_grid_with_storm_risk() {
+        let mut grid = RouteGrid::new(0.0, 5.0, 0.0, 5.0, 50.0);
+        populate_grid_with_storm_risk(&mut grid, 0.25);
+        for i in 0..grid.lat_steps {
+            for j in 0..grid.lon_steps {
+                assert!(approx_eq(grid.cell_at(i, j).storm_risk, 0.25, EPSILON));
+            }
+        }
+    }
+
+    #[test]
+    fn test_correlation_coefficient_empty() {
+        assert!(approx_eq(correlation_coefficient(&[], &[]), 0.0, EPSILON));
+        assert!(approx_eq(correlation_coefficient(&[1.0], &[2.0]), 0.0, EPSILON));
+    }
+
+    #[test]
+    fn test_correlation_coefficient_perfect() {
+        let xs = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let ys = vec![2.0, 4.0, 6.0, 8.0, 10.0];
+        let r = correlation_coefficient(&xs, &ys);
+        assert!(approx_eq(r, 1.0, 0.001));
+    }
+
+    #[test]
+    fn test_correlation_coefficient_negative() {
+        let xs = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let ys = vec![5.0, 4.0, 3.0, 2.0, 1.0];
+        let r = correlation_coefficient(&xs, &ys);
+        assert!(approx_eq(r, -1.0, 0.001));
+    }
+
+    #[test]
+    fn test_compute_historical_correlation_empty() {
+        let route = vec![vec![0.0, 0.0], vec![1.0, 0.0]];
+        let historical: Vec<Vec<Vec<f64>>> = Vec::new();
+        assert!(approx_eq(compute_historical_correlation(&route, &historical), 0.0, EPSILON));
+    }
+
+    #[test]
+    fn test_route_node_ord() {
+        let a = RouteNode { f: 10.0, g: 5.0, h: 5.0, i: 0, j: 0 };
+        let b = RouteNode { f: 5.0, g: 2.0, h: 3.0, i: 1, j: 1 };
+        assert!(a < b);
+        assert!(b > a);
+    }
+
+    #[test]
+    fn test_point_to_line_distance() {
+        let d = point_to_line_distance(0.0, 1.0, 0.0, 0.0, 2.0, 0.0);
+        assert!(d > 0.0);
+
+        let d = point_to_line_distance(1.0, 0.0, 0.0, 0.0, 2.0, 0.0);
+        assert!(approx_eq(d, 0.0, 0.1));
+    }
+
+    #[test]
+    fn test_path_to_route_points() {
+        let grid = RouteGrid::new(0.0, 10.0, 0.0, 10.0, 50.0);
+        let path = vec![(0, 0), (grid.lat_steps - 1, grid.lon_steps - 1)];
+        let points = path_to_route_points(&grid, &path);
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].len(), 2);
+    }
+
+    #[test]
+    fn test_extract_route_points_from_voyage_empty() {
+        let voyage = VoyageRecord {
+            id: 1,
+            departure_port_id: 1,
+            arrival_port_id: 2,
+            voyage_year: 100,
+            season: "summer".to_string(),
+            ship_type: "trireme".to_string(),
+            cargo_type: "grain".to_string(),
+            encountered_storm: false,
+            route_points: None,
+            created_at: None,
+        };
+        let points = extract_route_points_from_voyage(&voyage);
+        assert!(points.is_empty());
+    }
+}

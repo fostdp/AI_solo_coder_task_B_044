@@ -772,3 +772,655 @@ pub async fn analyze_cargo_spread(
         spread_network,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use maritime_common::config::CargoSpreadConfig;
+    use maritime_common::models::*;
+    use std::collections::HashSet;
+
+    fn make_test_port(id: i32, name: &str, region: Option<&str>, lat: Option<f64>, lon: Option<f64>) -> Port {
+        Port {
+            id,
+            name: name.to_string(),
+            name_zh: None,
+            region: region.map(|r| r.to_string()),
+            lat,
+            lon,
+        }
+    }
+
+    fn make_test_voyage(id: i32, from: i32, to: i32, year: i32, cargo: &str) -> VoyageRecord {
+        VoyageRecord {
+            id,
+            departure_port_id: from,
+            arrival_port_id: to,
+            voyage_year: year,
+            season: "spring".to_string(),
+            ship_type: "cog".to_string(),
+            cargo_type: cargo.to_string(),
+            encountered_storm: false,
+            route_points: None,
+            created_at: None,
+        }
+    }
+
+    fn default_test_config() -> CargoSpreadConfig {
+        CargoSpreadConfig {
+            min_spread_threshold: 0.0,
+            diffusion_decay_rate: 1.0,
+            max_propagation_steps: 100,
+        }
+    }
+
+    mod spread_graph_tests {
+        use super::*;
+
+        #[test]
+        fn test_new_empty_graph() {
+            let graph = SpreadGraph::new();
+            assert_eq!(graph.nodes().len(), 0);
+            assert_eq!(graph.edges().len(), 0);
+            assert_eq!(graph.max_trade_volume(), 0.0);
+        }
+
+        #[test]
+        fn test_from_voyages_basic() {
+            let ports = vec![
+                make_test_port(1, "PortA", Some("Region1"), Some(0.0), Some(0.0)),
+                make_test_port(2, "PortB", Some("Region1"), Some(1.0), Some(1.0)),
+            ];
+            let voyages = vec![
+                make_test_voyage(1, 1, 2, 100, "spice"),
+            ];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+
+            assert_eq!(graph.nodes().len(), 2);
+            assert_eq!(graph.edges().len(), 1);
+
+            let edges = graph.edges();
+            assert_eq!(edges[0].0, 1);
+            assert_eq!(edges[0].1, 2);
+            assert_eq!(edges[0].2, 1.0);
+        }
+
+        #[test]
+        fn test_nodes_count() {
+            let ports = vec![
+                make_test_port(1, "A", None, None, None),
+                make_test_port(2, "B", None, None, None),
+                make_test_port(3, "C", None, None, None),
+            ];
+            let voyages: Vec<VoyageRecord> = Vec::new();
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            assert_eq!(graph.nodes().len(), 3);
+            let node_ids: HashSet<i32> = graph.nodes().into_iter().collect();
+            assert!(node_ids.contains(&1));
+            assert!(node_ids.contains(&2));
+            assert!(node_ids.contains(&3));
+        }
+
+        #[test]
+        fn test_edges_count() {
+            let ports = vec![
+                make_test_port(1, "A", None, None, None),
+                make_test_port(2, "B", None, None, None),
+                make_test_port(3, "C", None, None, None),
+            ];
+            let voyages = vec![
+                make_test_voyage(1, 1, 2, 100, "cargo"),
+                make_test_voyage(2, 2, 3, 100, "cargo"),
+            ];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            assert_eq!(graph.edges().len(), 2);
+        }
+
+        #[test]
+        fn test_get_port() {
+            let ports = vec![
+                make_test_port(1, "TestPort", Some("TestRegion"), Some(10.0), Some(20.0)),
+            ];
+            let voyages: Vec<VoyageRecord> = Vec::new();
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+
+            let port = graph.get_port(1);
+            assert!(port.is_some());
+            assert_eq!(port.unwrap().name, "TestPort");
+
+            assert!(graph.get_port(999).is_none());
+        }
+
+        #[test]
+        fn test_get_first_year() {
+            let ports = vec![
+                make_test_port(1, "A", None, None, None),
+                make_test_port(2, "B", None, None, None),
+            ];
+            let voyages = vec![
+                make_test_voyage(1, 1, 2, 500, "cargo"),
+                make_test_voyage(2, 1, 2, 300, "cargo"),
+            ];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+
+            assert_eq!(graph.get_first_year(1), Some(300));
+            assert_eq!(graph.get_first_year(2), Some(300));
+            assert!(graph.get_first_year(999).is_none());
+        }
+
+        #[test]
+        fn test_get_trade_volume() {
+            let ports = vec![
+                make_test_port(1, "A", None, None, None),
+                make_test_port(2, "B", None, None, None),
+                make_test_port(3, "C", None, None, None),
+            ];
+            let voyages = vec![
+                make_test_voyage(1, 1, 2, 100, "cargo"),
+                make_test_voyage(2, 1, 3, 100, "cargo"),
+            ];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+
+            assert_eq!(graph.get_trade_volume(1), 2.0);
+            assert_eq!(graph.get_trade_volume(2), 1.0);
+            assert_eq!(graph.get_trade_volume(3), 1.0);
+            assert_eq!(graph.get_trade_volume(999), 0.0);
+        }
+
+        #[test]
+        fn test_max_trade_volume_empty() {
+            let graph = SpreadGraph::new();
+            assert_eq!(graph.max_trade_volume(), 0.0);
+        }
+
+        #[test]
+        fn test_max_trade_volume() {
+            let ports = vec![
+                make_test_port(1, "A", None, None, None),
+                make_test_port(2, "B", None, None, None),
+            ];
+            let voyages = vec![
+                make_test_voyage(1, 1, 2, 100, "cargo"),
+                make_test_voyage(2, 1, 2, 100, "cargo"),
+            ];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            assert_eq!(graph.max_trade_volume(), 2.0);
+        }
+    }
+
+    mod graph_algorithm_tests {
+        use super::*;
+
+        #[test]
+        fn test_compute_betweenness_chain() {
+            let ports = vec![
+                make_test_port(1, "A", None, None, None),
+                make_test_port(2, "B", None, None, None),
+                make_test_port(3, "C", None, None, None),
+                make_test_port(4, "D", None, None, None),
+            ];
+            let voyages = vec![
+                make_test_voyage(1, 1, 2, 100, "cargo"),
+                make_test_voyage(2, 2, 3, 100, "cargo"),
+                make_test_voyage(3, 3, 4, 100, "cargo"),
+            ];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            let betweenness = graph.compute_betweenness_bfs();
+
+            let b1 = betweenness.get(&1).copied().unwrap_or(0.0);
+            let b2 = betweenness.get(&2).copied().unwrap_or(0.0);
+            let b3 = betweenness.get(&3).copied().unwrap_or(0.0);
+            let b4 = betweenness.get(&4).copied().unwrap_or(0.0);
+
+            assert_eq!(b1, 0.0);
+            assert_eq!(b4, 0.0);
+            assert!(b2 > 0.0);
+            assert!(b3 > 0.0);
+        }
+
+        #[test]
+        fn test_compute_betweenness_star() {
+            let ports = vec![
+                make_test_port(1, "Center", None, None, None),
+                make_test_port(2, "A", None, None, None),
+                make_test_port(3, "B", None, None, None),
+                make_test_port(4, "C", None, None, None),
+            ];
+            let voyages = vec![
+                make_test_voyage(1, 1, 2, 100, "cargo"),
+                make_test_voyage(2, 1, 3, 100, "cargo"),
+                make_test_voyage(3, 1, 4, 100, "cargo"),
+            ];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            let betweenness = graph.compute_betweenness_bfs();
+
+            let center_b = betweenness.get(&1).copied().unwrap_or(0.0);
+            let a_b = betweenness.get(&2).copied().unwrap_or(0.0);
+            let b_b = betweenness.get(&3).copied().unwrap_or(0.0);
+            let c_b = betweenness.get(&4).copied().unwrap_or(0.0);
+
+            assert!(center_b > a_b);
+            assert!(center_b > b_b);
+            assert!(center_b > c_b);
+            assert_eq!(a_b, 0.0);
+            assert_eq!(b_b, 0.0);
+            assert_eq!(c_b, 0.0);
+        }
+
+        #[test]
+        fn test_find_origin_ports() {
+            let ports = vec![
+                make_test_port(1, "A", None, None, None),
+                make_test_port(2, "B", None, None, None),
+                make_test_port(3, "C", None, None, None),
+            ];
+            let voyages = vec![
+                make_test_voyage(1, 1, 2, 500, "cargo"),
+                make_test_voyage(2, 2, 3, 300, "cargo"),
+            ];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            let origins = graph.find_origin_ports();
+
+            assert!(origins.contains(&2));
+            assert!(origins.contains(&3));
+            assert_eq!(origins.len(), 2);
+        }
+
+        #[test]
+        fn test_find_hub_ports() {
+            let ports = vec![
+                make_test_port(1, "Center", None, None, None),
+                make_test_port(2, "A", None, None, None),
+                make_test_port(3, "B", None, None, None),
+                make_test_port(4, "C", None, None, None),
+            ];
+            let voyages = vec![
+                make_test_voyage(1, 1, 2, 100, "cargo"),
+                make_test_voyage(2, 1, 3, 100, "cargo"),
+                make_test_voyage(3, 1, 4, 100, "cargo"),
+            ];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            let hubs = graph.find_hub_ports(2);
+
+            assert_eq!(hubs.len(), 2);
+            assert_eq!(hubs[0], 1);
+        }
+
+        #[test]
+        fn test_compute_adoption_levels() {
+            let ports = vec![
+                make_test_port(1, "A", None, None, None),
+                make_test_port(2, "B", None, None, None),
+            ];
+            let voyages = vec![
+                make_test_voyage(1, 1, 2, 100, "cargo"),
+                make_test_voyage(2, 1, 2, 100, "cargo"),
+            ];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            let adoption = graph.compute_adoption_levels();
+
+            assert_eq!(adoption.get(&1).copied().unwrap_or(0.0), 1.0);
+            assert_eq!(adoption.get(&2).copied().unwrap_or(0.0), 0.5);
+        }
+    }
+
+    mod tech_diffusion_tests {
+        use super::*;
+
+        #[test]
+        fn test_simulator_new() {
+            let ports = vec![
+                make_test_port(1, "A", None, Some(0.0), Some(0.0)),
+                make_test_port(2, "B", None, Some(1.0), Some(1.0)),
+            ];
+            let voyages = vec![make_test_voyage(1, 1, 2, 100, "cargo")];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            let config = default_test_config();
+            let simulator = TechDiffusionSimulator::new(graph, config);
+
+            assert_eq!(simulator.activated_ports().len(), 0);
+        }
+
+        #[test]
+        fn test_seed_origin() {
+            let ports = vec![
+                make_test_port(1, "A", None, Some(0.0), Some(0.0)),
+                make_test_port(2, "B", None, Some(1.0), Some(1.0)),
+            ];
+            let voyages = vec![make_test_voyage(1, 1, 2, 100, "cargo")];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            let config = default_test_config();
+            let mut simulator = TechDiffusionSimulator::new(graph, config);
+
+            simulator.seed_origin(1, 100);
+
+            let activated = simulator.activated_ports();
+            assert_eq!(activated.len(), 1);
+            assert!(activated.contains(&1));
+            assert_eq!(simulator.get_activation_year(1), Some(100));
+        }
+
+        #[test]
+        fn test_simulate_single_step_diffusion() {
+            let ports = vec![
+                make_test_port(1, "A", None, Some(0.0), Some(0.0)),
+                make_test_port(2, "B", None, Some(0.0), Some(1.0)),
+            ];
+            let voyages = vec![make_test_voyage(1, 1, 2, 100, "cargo")];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            let mut config = default_test_config();
+            config.min_spread_threshold = 0.0;
+            config.diffusion_decay_rate = 2.0;
+            config.max_propagation_steps = 100;
+            let mut simulator = TechDiffusionSimulator::new(graph, config);
+
+            simulator.seed_origin(1, 100);
+            simulator.simulate(100000.0);
+
+            let activated = simulator.activated_ports();
+            assert!(activated.len() >= 1);
+        }
+
+        #[test]
+        fn test_diffusion_from_single_source_connected() {
+            let ports = vec![
+                make_test_port(1, "A", None, Some(0.0), Some(0.0)),
+                make_test_port(2, "B", None, Some(0.0), Some(1.0)),
+                make_test_port(3, "C", None, Some(0.0), Some(2.0)),
+            ];
+            let voyages = vec![
+                make_test_voyage(1, 1, 2, 100, "cargo"),
+                make_test_voyage(2, 2, 3, 100, "cargo"),
+            ];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            let mut config = default_test_config();
+            config.min_spread_threshold = 0.0;
+            config.diffusion_decay_rate = 2.0;
+            config.max_propagation_steps = 100;
+            let mut simulator = TechDiffusionSimulator::new(graph, config);
+
+            simulator.seed_origin(1, 100);
+            simulator.simulate(100000.0);
+
+            let activated = simulator.activated_ports();
+            assert!(activated.len() >= 1);
+        }
+
+        #[test]
+        fn test_diffusion_time_gradient() {
+            let ports = vec![
+                make_test_port(1, "A", None, Some(0.0), Some(0.0)),
+                make_test_port(2, "B", None, Some(0.0), Some(10.0)),
+                make_test_port(3, "C", None, Some(0.0), Some(20.0)),
+            ];
+            let voyages = vec![
+                make_test_voyage(1, 1, 2, 100, "cargo"),
+                make_test_voyage(2, 2, 3, 100, "cargo"),
+            ];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            let mut config = default_test_config();
+            config.min_spread_threshold = 0.0;
+            config.diffusion_decay_rate = 2.0;
+            config.max_propagation_steps = 100;
+            let mut simulator = TechDiffusionSimulator::new(graph, config);
+
+            simulator.seed_origin(1, 100);
+            simulator.simulate(100.0);
+
+            let year1 = simulator.get_activation_year(1);
+            let year2 = simulator.get_activation_year(2);
+            let year3 = simulator.get_activation_year(3);
+
+            assert_eq!(year1, Some(100));
+            if let Some(y2) = year2 {
+                assert!(y2 >= 100);
+            }
+            if let (Some(y2), Some(y3)) = (year2, year3) {
+                assert!(y3 >= y2);
+            }
+        }
+
+        #[test]
+        fn test_diffusion_path() {
+            let ports = vec![
+                make_test_port(1, "A", None, Some(0.0), Some(0.0)),
+                make_test_port(2, "B", None, Some(0.0), Some(1.0)),
+            ];
+            let voyages = vec![make_test_voyage(1, 1, 2, 100, "cargo")];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            let mut config = default_test_config();
+            config.min_spread_threshold = 0.0;
+            config.diffusion_decay_rate = 2.0;
+            let mut simulator = TechDiffusionSimulator::new(graph, config);
+
+            simulator.seed_origin(1, 100);
+            simulator.simulate(100000.0);
+
+            let path = simulator.get_diffusion_path(1);
+            assert_eq!(path.len(), 1);
+            assert_eq!(path[0], 1);
+        }
+    }
+
+    mod cultural_diversity_tests {
+        use super::*;
+
+        #[test]
+        fn test_compute_cultural_diversity_multi_region() {
+            let ports = vec![
+                make_test_port(1, "PortA", Some("Region1"), None, None),
+                make_test_port(2, "PortB", Some("Region2"), None, None),
+                make_test_port(3, "PortC", Some("Region3"), None, None),
+            ];
+            let voyages = vec![
+                make_test_voyage(1, 1, 2, 100, "spice"),
+                make_test_voyage(2, 3, 2, 100, "silk"),
+            ];
+            let diversity = compute_cultural_diversity_index(&voyages, &ports);
+
+            let port2_div = diversity.get(&2).copied().unwrap_or(0.0);
+            assert!(port2_div >= 2.0);
+        }
+
+        #[test]
+        fn test_compute_cultural_diversity_single_region_lower_than_multi() {
+            let ports_single = vec![
+                make_test_port(1, "PortA", Some("Region1"), None, None),
+                make_test_port(2, "PortB", Some("Region1"), None, None),
+                make_test_port(3, "PortC", Some("Region1"), None, None),
+            ];
+            let voyages_single = vec![
+                make_test_voyage(1, 1, 2, 100, "spice"),
+                make_test_voyage(2, 3, 2, 100, "silk"),
+            ];
+            let diversity_single = compute_cultural_diversity_index(&voyages_single, &ports_single);
+
+            let ports_multi = vec![
+                make_test_port(1, "PortA", Some("Region1"), None, None),
+                make_test_port(2, "PortB", Some("Region2"), None, None),
+                make_test_port(3, "PortC", Some("Region3"), None, None),
+            ];
+            let voyages_multi = vec![
+                make_test_voyage(1, 1, 2, 100, "spice"),
+                make_test_voyage(2, 3, 2, 100, "silk"),
+            ];
+            let diversity_multi = compute_cultural_diversity_index(&voyages_multi, &ports_multi);
+
+            let port2_single = diversity_single.get(&2).copied().unwrap_or(0.0);
+            let port2_multi = diversity_multi.get(&2).copied().unwrap_or(0.0);
+            assert!(port2_multi > port2_single);
+        }
+
+        #[test]
+        fn test_identify_cross_civilization_routes() {
+            let ports = vec![
+                make_test_port(1, "PortA", Some("Region1"), None, None),
+                make_test_port(2, "PortB", Some("Region2"), None, None),
+                make_test_port(3, "PortC", Some("Region1"), None, None),
+            ];
+            let voyages = vec![
+                make_test_voyage(1, 1, 2, 100, "cargo"),
+                make_test_voyage(2, 1, 3, 100, "cargo"),
+                make_test_voyage(3, 2, 3, 200, "cargo"),
+            ];
+            let routes = identify_cross_civilization_routes(&voyages, &ports);
+
+            assert!(routes.len() >= 1);
+        }
+    }
+
+    mod technology_preset_tests {
+        use super::*;
+
+        #[test]
+        fn test_get_technology_presets_not_empty() {
+            let presets = get_technology_presets();
+            assert!(!presets.is_empty());
+        }
+
+        #[test]
+        fn test_each_preset_has_name_and_keywords() {
+            let presets = get_technology_presets();
+            for preset in &presets {
+                assert!(!preset.name.is_empty());
+                assert!(!preset.name_zh.is_empty());
+                assert!(!preset.origin_keywords.is_empty());
+            }
+        }
+
+        #[test]
+        fn test_find_origin_port_by_keyword_match_name() {
+            let ports = vec![
+                make_test_port(1, "Quanzhou Port", Some("China"), None, None),
+                make_test_port(2, "Alexandria", Some("Egypt"), None, None),
+            ];
+            let keywords = vec!["quanzhou".to_string()];
+            let result = find_origin_port_by_keyword(&ports, &keywords);
+            assert_eq!(result, Some(1));
+        }
+
+        #[test]
+        fn test_find_origin_port_by_keyword_match_region() {
+            let ports = vec![
+                make_test_port(1, "PortA", Some("Levant Coast"), None, None),
+                make_test_port(2, "PortB", Some("Greece"), None, None),
+            ];
+            let keywords = vec!["levant".to_string()];
+            let result = find_origin_port_by_keyword(&ports, &keywords);
+            assert_eq!(result, Some(1));
+        }
+
+        #[test]
+        fn test_find_origin_port_by_keyword_no_match() {
+            let ports = vec![
+                make_test_port(1, "PortA", Some("Region1"), None, None),
+                make_test_port(2, "PortB", Some("Region2"), None, None),
+            ];
+            let keywords = vec!["nonexistent".to_string()];
+            let result = find_origin_port_by_keyword(&ports, &keywords);
+            assert_eq!(result, None);
+        }
+    }
+
+    mod boundary_tests {
+        use super::*;
+
+        #[test]
+        fn test_empty_voyages_empty_graph_edges() {
+            let ports = vec![
+                make_test_port(1, "A", None, None, None),
+                make_test_port(2, "B", None, None, None),
+            ];
+            let voyages: Vec<VoyageRecord> = Vec::new();
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            assert_eq!(graph.edges().len(), 0);
+            assert_eq!(graph.nodes().len(), 2);
+        }
+
+        #[test]
+        fn test_single_node_no_edges() {
+            let ports = vec![
+                make_test_port(1, "A", None, None, None),
+            ];
+            let voyages: Vec<VoyageRecord> = Vec::new();
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            assert_eq!(graph.nodes().len(), 1);
+            assert_eq!(graph.edges().len(), 0);
+        }
+
+        #[test]
+        fn test_self_loop_voyage() {
+            let ports = vec![
+                make_test_port(1, "A", None, None, None),
+            ];
+            let voyages = vec![
+                make_test_voyage(1, 1, 1, 100, "cargo"),
+            ];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            assert_eq!(graph.edges().len(), 1);
+            assert_eq!(graph.get_trade_volume(1), 2.0);
+        }
+
+        #[test]
+        fn test_duplicate_routes_weight_accumulates() {
+            let ports = vec![
+                make_test_port(1, "A", None, None, None),
+                make_test_port(2, "B", None, None, None),
+            ];
+            let voyages = vec![
+                make_test_voyage(1, 1, 2, 100, "cargo"),
+                make_test_voyage(2, 1, 2, 100, "cargo"),
+                make_test_voyage(3, 1, 2, 100, "cargo"),
+            ];
+            let graph = SpreadGraph::from_voyages(&voyages, &ports);
+            let edges = graph.edges();
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0].2, 3.0);
+        }
+
+        #[test]
+        fn test_default_impl() {
+            let graph = SpreadGraph::default();
+            assert_eq!(graph.nodes().len(), 0);
+            assert_eq!(graph.edges().len(), 0);
+        }
+
+        #[test]
+        fn test_diffusion_node_new() {
+            let node = DiffusionNode::new(42);
+            assert_eq!(node.port_id, 42);
+            assert!(!node.activated);
+            assert!(node.activation_year.is_none());
+            assert!(node.source_port.is_none());
+            assert_eq!(node.diffusion_probability, 0.0);
+        }
+
+        #[test]
+        fn test_get_cargo_spread_records() {
+            let voyages = vec![
+                make_test_voyage(1, 1, 2, 200, "spice"),
+                make_test_voyage(2, 2, 3, 100, "spice"),
+                make_test_voyage(3, 1, 3, 150, "silk"),
+            ];
+            let records = get_cargo_spread_records(&voyages, "spice");
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].voyage_year, 100);
+            assert_eq!(records[1].voyage_year, 200);
+        }
+
+        #[test]
+        fn test_build_cargo_spread_network() {
+            let ports = vec![
+                make_test_port(1, "PortA", None, None, None),
+                make_test_port(2, "PortB", None, None, None),
+            ];
+            let voyages = vec![
+                make_test_voyage(1, 1, 2, 100, "spice"),
+                make_test_voyage(2, 1, 2, 200, "silk"),
+            ];
+            let network = build_cargo_spread_network(&voyages, &ports, "spice", 5);
+            assert_eq!(network.nodes.len(), 2);
+            assert_eq!(network.edges.len(), 1);
+        }
+    }
+}

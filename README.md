@@ -381,6 +381,38 @@ n_trees = 10
 max_depth = 5
 min_samples = 5
 sample_ratio = 0.7
+
+[maritime_insights]
+port = 3004
+metrics_port = 4004
+
+[maritime_insights.panel_regression]
+significance_level = 0.05
+min_observations = 10
+max_predictors = 8
+
+[maritime_insights.granger_causality]
+max_lags = 5
+significance_level = 0.05
+min_observations = 20
+
+[maritime_insights.route_planning]
+grid_resolution_km = 50.0     # A*网格分辨率
+max_iterations = 10000
+current_weight = 0.3          # 洋流权重
+wind_weight = 0.3             # 风权重
+storm_risk_weight = 0.2       # 风暴风险权重
+distance_weight = 0.2         # 距离权重
+
+[maritime_insights.cargo_spread]
+min_spread_threshold = 0.1
+diffusion_decay_rate = 0.1
+max_propagation_steps = 10
+
+[maritime_insights.modern_comparison]
+modern_risk_multiplier = 0.6   # 现代风险倍率
+tech_improvement_factor = 0.7  # 技术改进因子
+weather_forecast_accuracy = 0.85  # 天气预报准确率
 ```
 
 可通过 `CONFIG_PATH` 环境变量覆盖路径。

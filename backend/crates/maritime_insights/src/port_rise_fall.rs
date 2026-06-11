@@ -986,3 +986,308 @@ pub struct RiseFallQuery {
     pub port_id: Option<i32>,
     pub region: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_approx_eq(a: f64, b: f64, epsilon: f64) {
+        assert!(
+            (a - b).abs() < epsilon,
+            "assertion failed: `(left ≈ right)`\n  left: `{}`\n right: `{}`\n  diff: `{}`",
+            a,
+            b,
+            (a - b).abs()
+        );
+    }
+
+    #[test]
+    fn test_ln_gamma_known_values() {
+        assert_approx_eq(ln_gamma(1.0), 0.0, 1e-10);
+        assert_approx_eq(ln_gamma(2.0), 0.0, 1e-10);
+        assert_approx_eq(ln_gamma(3.0), 2.0_f64.ln(), 1e-10);
+        assert_approx_eq(ln_gamma(0.5), 0.5 * std::f64::consts::PI.ln(), 1e-10);
+    }
+
+    #[test]
+    fn test_t_cdf_at_zero() {
+        assert_approx_eq(t_cdf(0.0, 10.0), 0.5, 1e-10);
+        assert_approx_eq(t_cdf(0.0, 1.0), 0.5, 1e-10);
+    }
+
+    #[test]
+    fn test_t_cdf_large_t() {
+        assert!(t_cdf(100.0, 10.0) > 0.999);
+        assert!(t_cdf(-100.0, 10.0) < 0.001);
+    }
+
+    #[test]
+    fn test_t_cdf_df_one() {
+        let p = t_cdf(1.0, 1.0);
+        assert!(p > 0.5 && p < 1.0);
+        assert_approx_eq(p, 0.75, 0.01);
+    }
+
+    #[test]
+    fn test_t_cdf_invalid_df() {
+        assert!(t_cdf(1.0, 0.0).is_nan());
+        assert!(t_cdf(1.0, -1.0).is_nan());
+    }
+
+    #[test]
+    fn test_f_cdf_at_zero() {
+        assert_approx_eq(f_cdf(0.0, 1.0, 1.0), 0.0, 1e-10);
+        assert_approx_eq(f_cdf(0.0, 5.0, 10.0), 0.0, 1e-10);
+    }
+
+    #[test]
+    fn test_f_cdf_large_f() {
+        assert!(f_cdf(1000.0, 5.0, 5.0) > 0.99);
+    }
+
+    #[test]
+    fn test_f_cdf_invalid_params() {
+        assert_approx_eq(f_cdf(1.0, 0.0, 5.0), 0.0, 1e-15);
+        assert_approx_eq(f_cdf(1.0, 5.0, 0.0), 0.0, 1e-15);
+        assert_approx_eq(f_cdf(-1.0, 5.0, 5.0), 0.0, 1e-15);
+    }
+
+    #[test]
+    fn test_t_pvalue_basic() {
+        assert_approx_eq(t_pvalue(0.0, 10.0), 1.0, 1e-10);
+        assert!(t_pvalue(10.0, 10.0) < 0.001);
+        assert_approx_eq(t_pvalue(2.0, 10.0), t_pvalue(-2.0, 10.0), 1e-10);
+    }
+
+    #[test]
+    fn test_f_pvalue_basic() {
+        assert!(f_pvalue(100.0, 5.0, 5.0) < 0.001);
+        assert_approx_eq(f_pvalue(0.0, 5.0, 5.0), 1.0, 1e-10);
+    }
+
+    #[test]
+    fn test_mat_transpose_2x3() {
+        let a = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
+        let at = mat_transpose(&a);
+        assert_eq!(at.len(), 3);
+        assert_eq!(at[0].len(), 2);
+        assert_approx_eq(at[0][0], 1.0, 1e-15);
+        assert_approx_eq(at[0][1], 4.0, 1e-15);
+        assert_approx_eq(at[1][0], 2.0, 1e-15);
+        assert_approx_eq(at[2][1], 6.0, 1e-15);
+    }
+
+    #[test]
+    fn test_mat_transpose_empty() {
+        let a: Vec<Vec<f64>> = Vec::new();
+        assert!(mat_transpose(&a).is_empty());
+    }
+
+    #[test]
+    fn test_mat_multiply_known_result() {
+        let a = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
+        let b = vec![vec![5.0, 6.0], vec![7.0, 8.0]];
+        let c = mat_multiply(&a, &b);
+        assert_approx_eq(c[0][0], 19.0, 1e-15);
+        assert_approx_eq(c[0][1], 22.0, 1e-15);
+        assert_approx_eq(c[1][0], 43.0, 1e-15);
+        assert_approx_eq(c[1][1], 50.0, 1e-15);
+    }
+
+    #[test]
+    fn test_mat_multiply_different_sizes() {
+        let a = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
+        let b = vec![vec![7.0, 8.0], vec![9.0, 10.0], vec![11.0, 12.0]];
+        let c = mat_multiply(&a, &b);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].len(), 2);
+        assert_approx_eq(c[0][0], 58.0, 1e-15);
+        assert_approx_eq(c[1][1], 154.0, 1e-15);
+    }
+
+    #[test]
+    fn test_mat_inverse_identity() {
+        let i = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0],
+            vec![0.0, 0.0, 1.0],
+        ];
+        let inv = mat_inverse(&i).unwrap();
+        for row in 0..3 {
+            for col in 0..3 {
+                if row == col {
+                    assert_approx_eq(inv[row][col], 1.0, 1e-10);
+                } else {
+                    assert_approx_eq(inv[row][col], 0.0, 1e-10);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_mat_inverse_diagonal_2x2() {
+        let a = vec![vec![2.0, 0.0], vec![0.0, 3.0]];
+        let inv = mat_inverse(&a).unwrap();
+        assert_approx_eq(inv[0][0], 0.5, 1e-10);
+        assert_approx_eq(inv[0][1], 0.0, 1e-10);
+        assert_approx_eq(inv[1][0], 0.0, 1e-10);
+        assert_approx_eq(inv[1][1], 1.0 / 3.0, 1e-10);
+    }
+
+    #[test]
+    fn test_mat_inverse_singular_returns_none() {
+        let a = vec![vec![1.0, 2.0], vec![2.0, 4.0]];
+        assert!(mat_inverse(&a).is_none());
+    }
+
+    #[test]
+    fn test_mat_inverse_non_square_returns_none() {
+        let a = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
+        assert!(mat_inverse(&a).is_none());
+    }
+
+    #[test]
+    fn test_mat_vec_multiply_known() {
+        let a = vec![vec![1.0, 2.0], vec![3.0, 4.0], vec![5.0, 6.0]];
+        let v = vec![7.0, 8.0];
+        let result = mat_vec_multiply(&a, &v);
+        assert_eq!(result.len(), 3);
+        assert_approx_eq(result[0], 23.0, 1e-15);
+        assert_approx_eq(result[1], 53.0, 1e-15);
+        assert_approx_eq(result[2], 83.0, 1e-15);
+    }
+
+    #[test]
+    fn test_mat_vec_multiply_empty() {
+        let a: Vec<Vec<f64>> = Vec::new();
+        let v: Vec<f64> = Vec::new();
+        assert!(mat_vec_multiply(&a, &v).is_empty());
+    }
+
+    #[test]
+    fn test_panel_regression_simple_linear() {
+        let x: Vec<Vec<f64>> = (0..10).map(|i| vec![1.0, i as f64]).collect();
+        let y: Vec<f64> = (0..10).map(|i| 2.0 * i as f64 + 1.0).collect();
+        let model = PanelRegression::fit(&x, &y).unwrap();
+        let coefs = model.coefficients();
+        assert_approx_eq(coefs[0], 1.0, 1e-10);
+        assert_approx_eq(coefs[1], 2.0, 1e-10);
+    }
+
+    #[test]
+    fn test_panel_regression_perfect_fit_r_squared() {
+        let x: Vec<Vec<f64>> = (0..10).map(|i| vec![1.0, i as f64]).collect();
+        let y: Vec<f64> = (0..10).map(|i| 3.0 * i as f64 + 5.0).collect();
+        let model = PanelRegression::fit(&x, &y).unwrap();
+        assert_approx_eq(model.r_squared(), 1.0, 1e-10);
+    }
+
+    #[test]
+    fn test_panel_regression_empty_data() {
+        let x: Vec<Vec<f64>> = Vec::new();
+        let y: Vec<f64> = Vec::new();
+        assert!(PanelRegression::fit(&x, &y).is_none());
+    }
+
+    #[test]
+    fn test_panel_regression_obs_less_than_vars() {
+        let x = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
+        let y = vec![5.0, 6.0];
+        assert!(PanelRegression::fit(&x, &y).is_none());
+    }
+
+    #[test]
+    fn test_panel_regression_constant_y_r_squared_zero() {
+        let x: Vec<Vec<f64>> = (0..5).map(|i| vec![1.0, i as f64]).collect();
+        let y = vec![10.0; 5];
+        let model = PanelRegression::fit(&x, &y).unwrap();
+        assert_approx_eq(model.r_squared(), 0.0, 1e-10);
+    }
+
+    #[test]
+    fn test_panel_regression_positive_coefficient_sign() {
+        let x: Vec<Vec<f64>> = (0..20).map(|i| vec![1.0, i as f64]).collect();
+        let y: Vec<f64> = (0..20)
+            .map(|i| i as f64 * 0.5 + 2.0 + (i as f64 * 0.1).sin())
+            .collect();
+        let model = PanelRegression::fit(&x, &y).unwrap();
+        assert!(model.coefficients()[1] > 0.0);
+    }
+
+    #[test]
+    fn test_granger_insufficient_data_returns_none() {
+        let y = vec![1.0, 2.0, 3.0];
+        let x = vec![4.0, 5.0, 6.0];
+        assert!(GrangerCausalityTest::test(&y, &x, 2, 0.05).is_none());
+    }
+
+    #[test]
+    fn test_granger_max_lags_zero_returns_none() {
+        let y: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let x: Vec<f64> = (0..20).map(|i| i as f64 * 0.5).collect();
+        assert!(GrangerCausalityTest::test(&y, &x, 0, 0.05).is_none());
+    }
+
+    #[test]
+    fn test_granger_independent_not_significant() {
+        use std::f64::consts::PI;
+        let y: Vec<f64> = (0..60).map(|i| (i as f64 * 0.1).sin()).collect();
+        let x: Vec<f64> = (0..60)
+            .map(|i| (i as f64 * 0.15 + PI / 2.0).cos() * 100.0)
+            .collect();
+        let test = GrangerCausalityTest::test(&y, &x, 3, 0.05);
+        if let Some(t) = test {
+            assert!(!t.is_significant());
+        }
+    }
+
+    #[test]
+    fn test_granger_lag_order_selection() {
+        let mut x = vec![0.0; 60];
+        let mut y = vec![0.0; 60];
+        for i in 0..60 {
+            x[i] = (i as f64 * 0.3).sin() + (i as f64 * 0.7).cos();
+        }
+        for i in 2..60 {
+            y[i] = 0.8 * x[i - 2] + 0.1 * y[i - 1];
+        }
+        let test = GrangerCausalityTest::test(&y, &x, 5, 0.05).unwrap();
+        assert!(test.lag_order() >= 1 && test.lag_order() <= 5);
+    }
+
+    #[test]
+    fn test_boundary_empty_inputs() {
+        assert!(mat_transpose(&[]).is_empty());
+        assert!(mat_multiply(&[], &[]).is_empty());
+        assert!(mat_vec_multiply(&[], &[]).is_empty());
+        assert!(mat_inverse(&[]).is_none());
+        assert!(PanelRegression::fit(&[], &[]).is_none());
+    }
+
+    #[test]
+    fn test_boundary_single_element() {
+        let a = vec![vec![5.0]];
+        let inv = mat_inverse(&a).unwrap();
+        assert_approx_eq(inv[0][0], 0.2, 1e-10);
+
+        let v = vec![3.0];
+        let result = mat_vec_multiply(&a, &v);
+        assert_approx_eq(result[0], 15.0, 1e-15);
+    }
+
+    #[test]
+    fn test_nan_handling() {
+        assert!(t_cdf(1.0, 0.0).is_nan());
+        assert!(t_cdf(1.0, -1.0).is_nan());
+        assert!(regularized_incomplete_beta(1.0, 1.0, -0.1).is_nan());
+        assert!(regularized_incomplete_beta(1.0, 1.0, 1.1).is_nan());
+    }
+
+    #[test]
+    fn test_extreme_values() {
+        assert!(ln_gamma(100.0) > 0.0);
+        assert!(t_cdf(1e6, 10.0) > 0.999999);
+        assert!(t_cdf(-1e6, 10.0) < 0.000001);
+        assert!(f_cdf(1e6, 5.0, 5.0) > 0.999);
+    }
+}
