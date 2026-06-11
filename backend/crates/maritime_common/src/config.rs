@@ -6,6 +6,56 @@ pub struct AppConfig {
     pub voyage_loader: VoyageLoaderConfig,
     pub network_analyzer: NetworkAnalyzerConfig,
     pub storm_risk_modeler: StormRiskModelerConfig,
+    pub maritime_insights: MaritimeInsightsConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MaritimeInsightsConfig {
+    pub port: u16,
+    pub metrics_port: u16,
+    pub panel_regression: PanelRegressionConfig,
+    pub granger_causality: GrangerCausalityConfig,
+    pub route_planning: RoutePlanningConfig,
+    pub cargo_spread: CargoSpreadConfig,
+    pub modern_comparison: ModernComparisonConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PanelRegressionConfig {
+    pub significance_level: f64,
+    pub min_observations: usize,
+    pub max_predictors: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GrangerCausalityConfig {
+    pub max_lags: usize,
+    pub significance_level: f64,
+    pub min_observations: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RoutePlanningConfig {
+    pub grid_resolution_km: f64,
+    pub max_iterations: usize,
+    pub current_weight: f64,
+    pub wind_weight: f64,
+    pub storm_risk_weight: f64,
+    pub distance_weight: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CargoSpreadConfig {
+    pub min_spread_threshold: f64,
+    pub diffusion_decay_rate: f64,
+    pub max_propagation_steps: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModernComparisonConfig {
+    pub modern_risk_multiplier: f64,
+    pub tech_improvement_factor: f64,
+    pub weather_forecast_accuracy: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

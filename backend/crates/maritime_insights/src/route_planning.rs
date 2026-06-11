@@ -1,0 +1,1109 @@
+use maritime_common::config::RoutePlanningConfig;
+use maritime_common::models::*;
+use sqlx::PgPool;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap};
+
+const EARTH_RADIUS_KM: f64 = 6371.0;
+const NAUTICAL_MILE_PER_KM: f64 = 0.539957;
+const HOURS_PER_DAY: f64 = 24.0;
+const MIN_SPEED_KNOTS: f64 = 0.5;
+
+fn deg_to_rad(deg: f64) -> f64 {
+    deg * std::f64::consts::PI / 180.0
+}
+
+fn rad_to_deg(rad: f64) -> f64 {
+    rad * 180.0 / std::f64::consts::PI
+}
+
+fn haversine_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let dlat = deg_to_rad(lat2 - lat1);
+    let dlon = deg_to_rad(lon2 - lon1);
+    let a = (dlat / 2.0).sin().powi(2)
+        + deg_to_rad(lat1).cos() * deg_to_rad(lat2).cos() * (dlon / 2.0).sin().powi(2);
+    let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
+    EARTH_RADIUS_KM * c
+}
+
+fn haversine_distance_nm(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    haversine_distance(lat1, lon1, lat2, lon2) * NAUTICAL_MILE_PER_KM
+}
+
+fn bearing(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let lat1_r = deg_to_rad(lat1);
+    let lat2_r = deg_to_rad(lat2);
+    let dlon_r = deg_to_rad(lon2 - lon1);
+    let y = dlon_r.sin() * lat2_r.cos();
+    let x = lat1_r.cos() * lat2_r.sin() - lat1_r.sin() * lat2_r.cos() * dlon_r.cos();
+    let brng = y.atan2(x);
+    (rad_to_deg(brng) + 360.0) % 360.0
+}
+
+fn direction_to_vector(deg: f64) -> (f64, f64) {
+    let rad = deg_to_rad(deg);
+    (rad.sin(), rad.cos())
+}
+
+#[derive(Debug, Clone)]
+struct GridCell {
+    lat: f64,
+    lon: f64,
+    current_speed_knots: f64,
+    current_direction_deg: f64,
+    wind_speed_knots: f64,
+    wind_direction_deg: f64,
+    storm_risk: f64,
+    base_cost: f64,
+}
+
+#[derive(Debug, Clone)]
+struct RouteGrid {
+    cells: Vec<Vec<GridCell>>,
+    lat_min: f64,
+    lat_max: f64,
+    lon_min: f64,
+    lon_max: f64,
+    lat_steps: usize,
+    lon_steps: usize,
+    grid_res_km: f64,
+}
+
+impl RouteGrid {
+    fn new(lat_min: f64, lat_max: f64, lon_min: f64, lon_max: f64, grid_res_km: f64) -> Self {
+        let lat_range = lat_max - lat_min;
+        let lon_range = lon_max - lon_min;
+        let avg_lat = (lat_min + lat_max) / 2.0;
+        let km_per_deg_lat = 111.0;
+        let km_per_deg_lon = 111.0 * deg_to_rad(avg_lat).cos();
+
+        let lat_steps = ((lat_range * km_per_deg_lat) / grid_res_km).ceil().max(2.0) as usize;
+        let lon_steps = ((lon_range * km_per_deg_lon.abs()) / grid_res_km)
+            .ceil()
+            .max(2.0) as usize;
+
+        let mut cells = Vec::with_capacity(lat_steps);
+        for i in 0..lat_steps {
+            let mut row = Vec::with_capacity(lon_steps);
+            let lat_frac = i as f64 / (lat_steps - 1) as f64;
+            let lat = lat_min + lat_frac * lat_range;
+            for j in 0..lon_steps {
+                let lon_frac = j as f64 / (lon_steps - 1) as f64;
+                let lon = lon_min + lon_frac * lon_range;
+                row.push(GridCell {
+                    lat,
+                    lon,
+                    current_speed_knots: 0.0,
+                    current_direction_deg: 0.0,
+                    wind_speed_knots: 0.0,
+                    wind_direction_deg: 0.0,
+                    storm_risk: 0.0,
+                    base_cost: 1.0,
+                });
+            }
+            cells.push(row);
+        }
+
+        RouteGrid {
+            cells,
+            lat_min,
+            lat_max,
+            lon_min,
+            lon_max,
+            lat_steps,
+            lon_steps,
+            grid_res_km,
+        }
+    }
+
+    fn cell_at(&self, i: usize, j: usize) -> &GridCell {
+        &self.cells[i][j]
+    }
+
+    fn cell_at_mut(&mut self, i: usize, j: usize) -> &mut GridCell {
+        &mut self.cells[i][j]
+    }
+
+    fn lat_lon_to_idx(&self, lat: f64, lon: f64) -> (usize, usize) {
+        let lat_frac = ((lat - self.lat_min) / (self.lat_max - self.lat_min)).clamp(0.0, 1.0);
+        let lon_frac = ((lon - self.lon_min) / (self.lon_max - self.lon_min)).clamp(0.0, 1.0);
+        let i = (lat_frac * (self.lat_steps - 1) as f64).round() as usize;
+        let j = (lon_frac * (self.lon_steps - 1) as f64).round() as usize;
+        (i.min(self.lat_steps - 1), j.min(self.lon_steps - 1))
+    }
+
+    fn idx_to_lat_lon(&self, i: usize, j: usize) -> (f64, f64) {
+        let cell = &self.cells[i][j];
+        (cell.lat, cell.lon)
+    }
+
+    fn cell_distance_km(&self, i1: usize, j1: usize, i2: usize, j2: usize) -> f64 {
+        let (lat1, lon1) = self.idx_to_lat_lon(i1, j1);
+        let (lat2, lon2) = self.idx_to_lat_lon(i2, j2);
+        haversine_distance(lat1, lon1, lat2, lon2)
+    }
+
+    fn cell_distance_nm(&self, i1: usize, j1: usize, i2: usize, j2: usize) -> f64 {
+        self.cell_distance_km(i1, j1, i2, j2) * NAUTICAL_MILE_PER_KM
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RouteNode {
+    f: f64,
+    g: f64,
+    h: f64,
+    i: usize,
+    j: usize,
+}
+
+impl Eq for RouteNode {}
+
+impl Ord for RouteNode {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other.f.partial_cmp(&self.f).unwrap_or(Ordering::Equal)
+    }
+}
+
+impl PartialOrd for RouteNode {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+struct AStarOpenSet {
+    heap: BinaryHeap<RouteNode>,
+    best_g: HashMap<(usize, usize), f64>,
+}
+
+impl AStarOpenSet {
+    fn new() -> Self {
+        AStarOpenSet {
+            heap: BinaryHeap::new(),
+            best_g: HashMap::new(),
+        }
+    }
+
+    fn push(&mut self, node: RouteNode) {
+        let key = (node.i, node.j);
+        if let Some(&best) = self.best_g.get(&key) {
+            if node.g >= best {
+                return;
+            }
+        }
+        self.best_g.insert(key, node.g);
+        self.heap.push(node);
+    }
+
+    fn pop(&mut self) -> Option<RouteNode> {
+        loop {
+            let node = self.heap.pop()?;
+            let key = (node.i, node.j);
+            if let Some(&best) = self.best_g.get(&key) {
+                if node.g <= best {
+                    return Some(node);
+                }
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.heap.is_empty()
+    }
+
+    fn get_best_g(&self, i: usize, j: usize) -> Option<f64> {
+        self.best_g.get(&(i, j)).copied()
+    }
+}
+
+struct CurrentSample {
+    lat: f64,
+    lon: f64,
+    speed_knots: f64,
+    direction_deg: f64,
+}
+
+struct WindSample {
+    lat: f64,
+    lon: f64,
+    speed_knots: f64,
+    direction_deg: f64,
+}
+
+fn bilinear_interpolate(points: &[(f64, f64, f64)], x: f64, y: f64) -> f64 {
+    if points.is_empty() {
+        return 0.0;
+    }
+    if points.len() == 1 {
+        return points[0].2;
+    }
+
+    let mut total_weight = 0.0;
+    let mut weighted_sum = 0.0;
+
+    for &(px, py, val) in points {
+        let dx = px - x;
+        let dy = py - y;
+        let dist_sq = dx * dx + dy * dy;
+        let dist = dist_sq.sqrt().max(0.001);
+        let weight = 1.0 / dist;
+        weighted_sum += val * weight;
+        total_weight += weight;
+    }
+
+    if total_weight > 0.0 {
+        weighted_sum / total_weight
+    } else {
+        points[0].2
+    }
+}
+
+fn speed_projection_on_heading(speed_knots: f64, direction_deg: f64, heading_deg: f64) -> f64 {
+    let angle_diff = deg_to_rad(direction_deg - heading_deg);
+    speed_knots * angle_diff.cos()
+}
+
+fn compute_move_cost(
+    grid: &RouteGrid,
+    from_i: usize,
+    from_j: usize,
+    to_i: usize,
+    to_j: usize,
+    ship_base_speed_knots: f64,
+    config: &RoutePlanningConfig,
+) -> f64 {
+    let distance_nm = grid.cell_distance_nm(from_i, from_j, to_i, to_j);
+    let (from_lat, from_lon) = grid.idx_to_lat_lon(from_i, from_j);
+    let (to_lat, to_lon) = grid.idx_to_lat_lon(to_i, to_j);
+    let heading = bearing(from_lat, from_lon, to_lat, to_lon);
+
+    let from_cell = grid.cell_at(from_i, from_j);
+    let to_cell = grid.cell_at(to_i, to_j);
+
+    let avg_current_speed = (from_cell.current_speed_knots + to_cell.current_speed_knots) / 2.0;
+    let avg_current_dir = (from_cell.current_direction_deg + to_cell.current_direction_deg) / 2.0;
+    let avg_wind_speed = (from_cell.wind_speed_knots + to_cell.wind_speed_knots) / 2.0;
+    let avg_wind_dir = (from_cell.wind_direction_deg + to_cell.wind_direction_deg) / 2.0;
+    let avg_storm_risk = (from_cell.storm_risk + to_cell.storm_risk) / 2.0;
+
+    let current_assist = speed_projection_on_heading(avg_current_speed, avg_current_dir, heading)
+        * config.current_weight;
+    let wind_assist =
+        speed_projection_on_heading(avg_wind_speed, avg_wind_dir, heading) * config.wind_weight;
+    let risk_penalty = avg_storm_risk * config.storm_risk_weight * ship_base_speed_knots;
+
+    let effective_speed = ship_base_speed_knots + current_assist + wind_assist - risk_penalty;
+    let effective_speed = effective_speed.max(MIN_SPEED_KNOTS);
+
+    let time_hours = distance_nm / effective_speed;
+    time_hours / HOURS_PER_DAY
+}
+
+fn heuristic(
+    grid: &RouteGrid,
+    i: usize,
+    j: usize,
+    goal_i: usize,
+    goal_j: usize,
+    ship_max_speed_knots: f64,
+) -> f64 {
+    let distance_nm = grid.cell_distance_nm(i, j, goal_i, goal_j);
+    let time_hours = distance_nm / ship_max_speed_knots;
+    time_hours / HOURS_PER_DAY
+}
+
+const NEIGHBOR_OFFSETS: [(isize, isize); 8] = [
+    (-1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+    (1, 0),
+    (1, -1),
+    (0, -1),
+    (-1, -1),
+];
+
+fn a_star_search(
+    grid: &RouteGrid,
+    start_i: usize,
+    start_j: usize,
+    goal_i: usize,
+    goal_j: usize,
+    ship_base_speed_knots: f64,
+    ship_max_speed_knots: f64,
+    config: &RoutePlanningConfig,
+) -> Option<(Vec<(usize, usize)>, f64)> {
+    let mut open_set = AStarOpenSet::new();
+    let mut came_from: HashMap<(usize, usize), (usize, usize)> = HashMap::new();
+    let mut closed_set: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
+
+    let start_h = heuristic(grid, start_i, start_j, goal_i, goal_j, ship_max_speed_knots);
+    open_set.push(RouteNode {
+        f: start_h,
+        g: 0.0,
+        h: start_h,
+        i: start_i,
+        j: start_j,
+    });
+
+    let mut iterations = 0;
+    let max_iter = config.max_iterations.max(1000);
+
+    while !open_set.is_empty() && iterations < max_iter {
+        iterations += 1;
+
+        let current = open_set.pop().unwrap();
+
+        if current.i == goal_i && current.j == goal_j {
+            let mut path = Vec::new();
+            let mut ci = current.i;
+            let mut cj = current.j;
+            path.push((ci, cj));
+            while let Some(&prev) = came_from.get(&(ci, cj)) {
+                ci = prev.0;
+                cj = prev.1;
+                path.push((ci, cj));
+            }
+            path.reverse();
+            return Some((path, current.g));
+        }
+
+        closed_set.insert((current.i, current.j));
+
+        for &(di, dj) in &NEIGHBOR_OFFSETS {
+            let ni = current.i as isize + di;
+            let nj = current.j as isize + dj;
+
+            if ni < 0 || nj < 0 {
+                continue;
+            }
+            let ni = ni as usize;
+            let nj = nj as usize;
+
+            if ni >= grid.lat_steps || nj >= grid.lon_steps {
+                continue;
+            }
+
+            if closed_set.contains(&(ni, nj)) {
+                continue;
+            }
+
+            let move_cost = compute_move_cost(
+                grid,
+                current.i,
+                current.j,
+                ni,
+                nj,
+                ship_base_speed_knots,
+                config,
+            );
+            let tentative_g = current.g + move_cost;
+
+            if let Some(best_g) = open_set.get_best_g(ni, nj) {
+                if tentative_g >= best_g {
+                    continue;
+                }
+            }
+
+            came_from.insert((ni, nj), (current.i, current.j));
+            let h = heuristic(grid, ni, nj, goal_i, goal_j, ship_max_speed_knots);
+            open_set.push(RouteNode {
+                f: tentative_g + h,
+                g: tentative_g,
+                h,
+                i: ni,
+                j: nj,
+            });
+        }
+    }
+
+    None
+}
+
+fn ship_base_speed(ship_type: &str) -> f64 {
+    match ship_type {
+        "trireme" => 6.0,
+        "galley" => 5.0,
+        "longship" => 5.5,
+        "dhow" => 4.5,
+        "merchant_round_ship" => 4.0,
+        "junk" => 5.0,
+        "carrack" => 4.5,
+        "treasure_ship" => 4.0,
+        _ => 5.0,
+    }
+}
+
+fn ship_max_speed(ship_type: &str) -> f64 {
+    ship_base_speed(ship_type) * 1.5
+}
+
+async fn load_ocean_currents(
+    pool: &PgPool,
+    lat_min: f64,
+    lat_max: f64,
+    lon_min: f64,
+    lon_max: f64,
+    season: &str,
+) -> Vec<CurrentSample> {
+    let query = r#"
+        SELECT 
+            ST_Y(ST_StartPoint(geom)) as start_lat,
+            ST_X(ST_StartPoint(geom)) as start_lon,
+            ST_Y(ST_EndPoint(geom)) as end_lat,
+            ST_X(ST_EndPoint(geom)) as end_lon,
+            speed_knots,
+            direction_deg
+        FROM ocean_currents
+        WHERE season = $1
+          AND geom && ST_MakeEnvelope($2, $3, $4, $5, 4326)
+    "#;
+
+    let result: Result<Vec<(f64, f64, f64, f64, Option<f64>, Option<f64>)>, _> =
+        sqlx::query_as(query)
+            .bind(season)
+            .bind(lon_min)
+            .bind(lat_min)
+            .bind(lon_max)
+            .bind(lat_max)
+            .fetch_all(pool)
+            .await;
+
+    let rows = match result {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut samples = Vec::new();
+    for (start_lat, start_lon, end_lat, end_lon, speed_opt, dir_opt) in rows {
+        let speed = speed_opt.unwrap_or(1.0);
+        let direction = dir_opt.unwrap_or(0.0);
+        let mid_lat = (start_lat + end_lat) / 2.0;
+        let mid_lon = (start_lon + end_lon) / 2.0;
+        samples.push(CurrentSample {
+            lat: mid_lat,
+            lon: mid_lon,
+            speed_knots: speed,
+            direction_deg: direction,
+        });
+        samples.push(CurrentSample {
+            lat: start_lat,
+            lon: start_lon,
+            speed_knots: speed,
+            direction_deg: direction,
+        });
+        samples.push(CurrentSample {
+            lat: end_lat,
+            lon: end_lon,
+            speed_knots: speed,
+            direction_deg: direction,
+        });
+    }
+
+    samples
+}
+
+async fn load_wind_fields(
+    pool: &PgPool,
+    lat_min: f64,
+    lat_max: f64,
+    lon_min: f64,
+    lon_max: f64,
+    season: &str,
+) -> Vec<WindSample> {
+    let query = r#"
+        SELECT 
+            ST_Y(ST_Centroid(geom)) as center_lat,
+            ST_X(ST_Centroid(geom)) as center_lon,
+            avg_speed_knots,
+            avg_direction_deg
+        FROM wind_fields
+        WHERE season = $1
+          AND geom && ST_MakeEnvelope($2, $3, $4, $5, 4326)
+    "#;
+
+    let result: Result<Vec<(f64, f64, Option<f64>, Option<f64>)>, _> = sqlx::query_as(query)
+        .bind(season)
+        .bind(lon_min)
+        .bind(lat_min)
+        .bind(lon_max)
+        .bind(lat_max)
+        .fetch_all(pool)
+        .await;
+
+    let rows = match result {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut samples = Vec::new();
+    for (center_lat, center_lon, speed_opt, dir_opt) in rows {
+        let speed = speed_opt.unwrap_or(10.0);
+        let direction = dir_opt.unwrap_or(0.0);
+        samples.push(WindSample {
+            lat: center_lat,
+            lon: center_lon,
+            speed_knots: speed,
+            direction_deg: direction,
+        });
+    }
+
+    samples
+}
+
+fn populate_grid_with_env_data(
+    grid: &mut RouteGrid,
+    current_samples: &[CurrentSample],
+    wind_samples: &[WindSample],
+) {
+    let current_speed_points: Vec<(f64, f64, f64)> = current_samples
+        .iter()
+        .map(|s| (s.lat, s.lon, s.speed_knots))
+        .collect();
+    let current_dir_points: Vec<(f64, f64, f64)> = current_samples
+        .iter()
+        .map(|s| (s.lat, s.lon, s.direction_deg))
+        .collect();
+    let wind_speed_points: Vec<(f64, f64, f64)> = wind_samples
+        .iter()
+        .map(|s| (s.lat, s.lon, s.speed_knots))
+        .collect();
+    let wind_dir_points: Vec<(f64, f64, f64)> = wind_samples
+        .iter()
+        .map(|s| (s.lat, s.lon, s.direction_deg))
+        .collect();
+
+    for i in 0..grid.lat_steps {
+        for j in 0..grid.lon_steps {
+            let cell = grid.cell_at_mut(i, j);
+            let lat = cell.lat;
+            let lon = cell.lon;
+
+            cell.current_speed_knots = bilinear_interpolate(&current_speed_points, lat, lon);
+            cell.current_direction_deg = bilinear_interpolate(&current_dir_points, lat, lon);
+            cell.wind_speed_knots = bilinear_interpolate(&wind_speed_points, lat, lon);
+            cell.wind_direction_deg = bilinear_interpolate(&wind_dir_points, lat, lon);
+        }
+    }
+}
+
+async fn get_storm_risk_for_region(
+    pool: &PgPool,
+    lat_min: f64,
+    lat_max: f64,
+    lon_min: f64,
+    lon_max: f64,
+    season: &str,
+) -> f64 {
+    let mid_lat = (lat_min + lat_max) / 2.0;
+    let mid_lon = (lon_min + lon_max) / 2.0;
+
+    let query = r#"
+        SELECT storm_frequency
+        FROM climate_periods
+        WHERE period_start <= 1500
+          AND period_end >= -500
+        ORDER BY id
+        LIMIT 1
+    "#;
+
+    let result: Result<Option<f64>, _> = sqlx::query_scalar(query).fetch_optional(pool).await;
+
+    match result {
+        Ok(Some(freq)) => freq,
+        _ => {
+            let voyage_query = r#"
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN encountered_storm THEN 1 ELSE 0 END) as storm_count
+                FROM voyage_records
+                WHERE season = $1
+                  AND departure_port_id IN (
+                    SELECT id FROM ports 
+                    WHERE ST_Y(geom) BETWEEN $2 AND $3 
+                      AND ST_X(geom) BETWEEN $4 AND $5
+                  )
+            "#;
+
+            let result: Result<Option<(i64, i64)>, _> = sqlx::query_as(voyage_query)
+                .bind(season)
+                .bind(lat_min)
+                .bind(lat_max)
+                .bind(lon_min)
+                .bind(lon_max)
+                .fetch_optional(pool)
+                .await;
+
+            match result {
+                Ok(Some((total, storm_count))) if total > 0 => storm_count as f64 / total as f64,
+                _ => 0.15,
+            }
+        }
+    }
+}
+
+fn populate_grid_with_storm_risk(grid: &mut RouteGrid, base_risk: f64) {
+    for i in 0..grid.lat_steps {
+        for j in 0..grid.lon_steps {
+            grid.cell_at_mut(i, j).storm_risk = base_risk;
+        }
+    }
+}
+
+fn path_to_route_points(grid: &RouteGrid, path: &[(usize, usize)]) -> Vec<Vec<f64>> {
+    path.iter()
+        .map(|&(i, j)| {
+            let (lat, lon) = grid.idx_to_lat_lon(i, j);
+            vec![lon, lat]
+        })
+        .collect()
+}
+
+fn total_distance_nm(route_points: &[Vec<f64>]) -> f64 {
+    if route_points.len() < 2 {
+        return 0.0;
+    }
+    let mut total = 0.0;
+    for i in 0..route_points.len() - 1 {
+        let p1 = &route_points[i];
+        let p2 = &route_points[i + 1];
+        total += haversine_distance_nm(p1[1], p1[0], p2[1], p2[0]);
+    }
+    total
+}
+
+async fn load_historical_voyages(
+    pool: &PgPool,
+    departure_port_id: i32,
+    arrival_port_id: i32,
+    season: &str,
+) -> Vec<VoyageRecord> {
+    let query = r#"
+        SELECT id, departure_port_id, arrival_port_id, voyage_year, season,
+               ship_type, cargo_type, encountered_storm, route_points, created_at
+        FROM voyage_records
+        WHERE departure_port_id = $1
+          AND arrival_port_id = $2
+          AND season = $3
+        LIMIT 50
+    "#;
+
+    sqlx::query_as::<_, VoyageRecord>(query)
+        .bind(departure_port_id)
+        .bind(arrival_port_id)
+        .bind(season)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+}
+
+fn extract_route_points_from_voyage(voyage: &VoyageRecord) -> Vec<Vec<f64>> {
+    let mut points = Vec::new();
+    if let Some(ref route_json) = voyage.route_points {
+        if let Some(arr) = route_json.as_array() {
+            for pt in arr {
+                if let Some(coord_arr) = pt.as_array() {
+                    let lon = coord_arr.get(0).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let lat = coord_arr.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    points.push(vec![lon, lat]);
+                }
+            }
+        }
+    }
+    points
+}
+
+fn point_to_line_distance(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+    let dx = bx - ax;
+    let dy = by - ay;
+    let len_sq = dx * dx + dy * dy;
+
+    if len_sq < 0.000001 {
+        return haversine_distance_nm(py, px, ay, ax);
+    }
+
+    let t = ((px - ax) * dx + (py - ay) * dy) / len_sq;
+    let t = t.clamp(0.0, 1.0);
+
+    let proj_x = ax + t * dx;
+    let proj_y = ay + t * dy;
+
+    haversine_distance_nm(py, px, proj_y, proj_x)
+}
+
+fn average_distance_deviation(route_a: &[Vec<f64>], route_b: &[Vec<f64>]) -> f64 {
+    if route_a.len() < 2 || route_b.len() < 2 {
+        return 0.0;
+    }
+
+    let total_dist_a = total_distance_nm(route_a);
+    if total_dist_a < 0.001 {
+        return 0.0;
+    }
+
+    let mut total_deviation = 0.0;
+    let mut count = 0;
+
+    for point in route_a {
+        let px = point[0];
+        let py = point[1];
+
+        let mut min_dist = f64::INFINITY;
+        for i in 0..route_b.len() - 1 {
+            let a = &route_b[i];
+            let b = &route_b[i + 1];
+            let dist = point_to_line_distance(px, py, a[0], a[1], b[0], b[1]);
+            if dist < min_dist {
+                min_dist = dist;
+            }
+        }
+
+        if min_dist.is_finite() {
+            total_deviation += min_dist;
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        return 0.0;
+    }
+
+    let avg_deviation_nm = total_deviation / count as f64;
+    (avg_deviation_nm / total_dist_a) * 100.0 * 10.0
+}
+
+fn frechet_distance_approx(route_a: &[Vec<f64>], route_b: &[Vec<f64>]) -> f64 {
+    if route_a.is_empty() || route_b.is_empty() {
+        return 0.0;
+    }
+
+    let n = route_a.len();
+    let m = route_b.len();
+
+    let mut dist_matrix = vec![vec![0.0; m]; n];
+    for i in 0..n {
+        for j in 0..m {
+            dist_matrix[i][j] =
+                haversine_distance_nm(route_a[i][1], route_a[i][0], route_b[j][1], route_b[j][0]);
+        }
+    }
+
+    let mut ca = vec![vec![-1.0; m]; n];
+
+    fn c(dist_matrix: &[Vec<f64>], ca: &mut [Vec<f64>], i: usize, j: usize) -> f64 {
+        if ca[i][j] > -0.5 {
+            return ca[i][j];
+        }
+
+        let result = if i == 0 && j == 0 {
+            dist_matrix[0][0]
+        } else if i > 0 && j == 0 {
+            c(dist_matrix, ca, i - 1, 0).max(dist_matrix[i][0])
+        } else if i == 0 && j > 0 {
+            c(dist_matrix, ca, 0, j - 1).max(dist_matrix[0][j])
+        } else if i > 0 && j > 0 {
+            let prev = c(dist_matrix, ca, i - 1, j - 1)
+                .min(c(dist_matrix, ca, i - 1, j))
+                .min(c(dist_matrix, ca, i, j - 1));
+            prev.max(dist_matrix[i][j])
+        } else {
+            f64::INFINITY
+        };
+
+        ca[i][j] = result;
+        result
+    }
+
+    c(&dist_matrix, &mut ca, n - 1, m - 1)
+}
+
+fn path_similarity_score(route_a: &[Vec<f64>], route_b: &[Vec<f64>]) -> f64 {
+    let total_dist = total_distance_nm(route_a).max(total_distance_nm(route_b));
+    if total_dist < 0.001 {
+        return 0.0;
+    }
+
+    let frechet = frechet_distance_approx(route_a, route_b);
+    let similarity = (1.0 - (frechet / total_dist).min(1.0)).max(0.0);
+    similarity
+}
+
+fn correlation_coefficient(xs: &[f64], ys: &[f64]) -> f64 {
+    if xs.len() != ys.len() || xs.len() < 2 {
+        return 0.0;
+    }
+
+    let n = xs.len() as f64;
+    let sum_x: f64 = xs.iter().sum();
+    let sum_y: f64 = ys.iter().sum();
+    let sum_xy: f64 = xs.iter().zip(ys.iter()).map(|(x, y)| x * y).sum();
+    let sum_x2: f64 = xs.iter().map(|x| x * x).sum();
+    let sum_y2: f64 = ys.iter().map(|y| y * y).sum();
+
+    let numerator = n * sum_xy - sum_x * sum_y;
+    let denominator = ((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y)).sqrt();
+
+    if denominator.abs() < 0.000001 {
+        return 0.0;
+    }
+
+    numerator / denominator
+}
+
+fn compute_historical_correlation(
+    optimized_route: &[Vec<f64>],
+    historical_routes: &[Vec<Vec<f64>>],
+) -> f64 {
+    if historical_routes.is_empty() {
+        return 0.0;
+    }
+
+    let opt_dist = total_distance_nm(optimized_route);
+    if opt_dist < 0.001 {
+        return 0.0;
+    }
+
+    let mut deviations = Vec::new();
+    let mut route_lengths = Vec::new();
+
+    for hist_route in historical_routes {
+        let dev = average_distance_deviation(optimized_route, hist_route);
+        let len = total_distance_nm(hist_route);
+        deviations.push(dev);
+        route_lengths.push(len);
+    }
+
+    -correlation_coefficient(&deviations, &route_lengths).abs() * 0.5 + 0.5
+}
+
+async fn get_port_coords(pool: &PgPool, port_id: i32) -> Option<(f64, f64, String)> {
+    let query = r#"
+        SELECT name, ST_Y(geom) as lat, ST_X(geom) as lon
+        FROM ports WHERE id = $1
+    "#;
+
+    let result: Result<Option<(String, f64, f64)>, _> = sqlx::query_as(query)
+        .bind(port_id)
+        .fetch_optional(pool)
+        .await;
+
+    match result {
+        Ok(Some((name, lat, lon))) => Some((lat, lon, name)),
+        _ => None,
+    }
+}
+
+pub async fn plan_optimal_route(
+    pool: &PgPool,
+    config: &RoutePlanningConfig,
+    departure_port_id: i32,
+    arrival_port_id: i32,
+    season: &str,
+    ship_type: &str,
+) -> Option<RoutePlanningResult> {
+    let (dep_lat, dep_lon, dep_name) = get_port_coords(pool, departure_port_id).await?;
+    let (arr_lat, arr_lon, arr_name) = get_port_coords(pool, arrival_port_id).await?;
+
+    let lat_min = dep_lat.min(arr_lat) - 2.0;
+    let lat_max = dep_lat.max(arr_lat) + 2.0;
+    let lon_min = dep_lon.min(arr_lon) - 2.0;
+    let lon_max = dep_lon.max(arr_lon) + 2.0;
+
+    let mut grid = RouteGrid::new(
+        lat_min,
+        lat_max,
+        lon_min,
+        lon_max,
+        config.grid_resolution_km,
+    );
+
+    let current_samples =
+        load_ocean_currents(pool, lat_min, lat_max, lon_min, lon_max, season).await;
+
+    let wind_samples = load_wind_fields(pool, lat_min, lat_max, lon_min, lon_max, season).await;
+
+    populate_grid_with_env_data(&mut grid, &current_samples, &wind_samples);
+
+    let base_storm_risk =
+        get_storm_risk_for_region(pool, lat_min, lat_max, lon_min, lon_max, season).await;
+    populate_grid_with_storm_risk(&mut grid, base_storm_risk);
+
+    let (start_i, start_j) = grid.lat_lon_to_idx(dep_lat, dep_lon);
+    let (goal_i, goal_j) = grid.lat_lon_to_idx(arr_lat, arr_lon);
+
+    let base_speed = ship_base_speed(ship_type);
+    let max_speed = ship_max_speed(ship_type);
+
+    let (path, estimated_days) = a_star_search(
+        &grid, start_i, start_j, goal_i, goal_j, base_speed, max_speed, config,
+    )?;
+
+    let route_points = path_to_route_points(&grid, &path);
+    let distance_nm = total_distance_nm(&route_points);
+    let avg_speed = if estimated_days > 0.0 {
+        distance_nm / (estimated_days * HOURS_PER_DAY)
+    } else {
+        base_speed
+    };
+
+    let historical_voyages =
+        load_historical_voyages(pool, departure_port_id, arrival_port_id, season).await;
+
+    let historical_routes: Vec<Vec<Vec<f64>>> = historical_voyages
+        .iter()
+        .map(|v| extract_route_points_from_voyage(v))
+        .filter(|r| r.len() >= 2)
+        .collect();
+
+    let (historical_deviation_pct, historical_correlation) = if !historical_routes.is_empty() {
+        let mut total_dev = 0.0;
+        for hist in &historical_routes {
+            total_dev += average_distance_deviation(&route_points, hist);
+        }
+        let avg_dev = total_dev / historical_routes.len() as f64;
+        let correlation = compute_historical_correlation(&route_points, &historical_routes);
+        (avg_dev, correlation)
+    } else {
+        (0.0, 0.0)
+    };
+
+    let storm_risk = if !path.is_empty() {
+        let mut total_risk = 0.0;
+        for &(i, j) in &path {
+            total_risk += grid.cell_at(i, j).storm_risk;
+        }
+        total_risk / path.len() as f64
+    } else {
+        0.0
+    };
+
+    Some(RoutePlanningResult {
+        departure_port_id,
+        arrival_port_id,
+        departure_port_name: dep_name,
+        arrival_port_name: arr_name,
+        season: season.to_string(),
+        ship_type: ship_type.to_string(),
+        method: "a_star".to_string(),
+        route_points,
+        distance_nautical_miles: distance_nm,
+        estimated_days,
+        avg_speed_knots: avg_speed,
+        storm_risk,
+        historical_deviation_pct,
+        historical_correlation,
+    })
+}
+
+pub async fn get_historical_route(
+    pool: &PgPool,
+    departure_port_id: i32,
+    arrival_port_id: i32,
+    season: &str,
+) -> Option<RoutePlanningResult> {
+    let voyages = load_historical_voyages(pool, departure_port_id, arrival_port_id, season).await;
+
+    if voyages.is_empty() {
+        return None;
+    }
+
+    let mut best_voyage = voyages
+        .iter()
+        .max_by(|a, b| {
+            let a_pts = extract_route_points_from_voyage(a);
+            let b_pts = extract_route_points_from_voyage(b);
+            a_pts.len().cmp(&b_pts.len())
+        })
+        .unwrap();
+
+    let route_points = extract_route_points_from_voyage(best_voyage);
+    let distance_nm = total_distance_nm(&route_points);
+
+    let storm_count = voyages.iter().filter(|v| v.encountered_storm).count();
+    let storm_risk = if voyages.is_empty() {
+        0.0
+    } else {
+        storm_count as f64 / voyages.len() as f64
+    };
+
+    let avg_speed = distance_nm / (10.0 * HOURS_PER_DAY);
+
+    let (dep_name, arr_name) = {
+        let dep = get_port_coords(pool, departure_port_id).await;
+        let arr = get_port_coords(pool, arrival_port_id).await;
+        (
+            dep.map(|(_, _, n)| n).unwrap_or_default(),
+            arr.map(|(_, _, n)| n).unwrap_or_default(),
+        )
+    };
+
+    Some(RoutePlanningResult {
+        departure_port_id,
+        arrival_port_id,
+        departure_port_name: dep_name,
+        arrival_port_name: arr_name,
+        season: season.to_string(),
+        ship_type: best_voyage.ship_type.clone(),
+        method: "historical".to_string(),
+        route_points,
+        distance_nautical_miles: distance_nm,
+        estimated_days: 10.0,
+        avg_speed_knots: avg_speed,
+        storm_risk,
+        historical_deviation_pct: 0.0,
+        historical_correlation: 1.0,
+    })
+}
+
+pub fn compare_routes(
+    optimized: &RoutePlanningResult,
+    historical: Option<&RoutePlanningResult>,
+) -> RouteComparison {
+    let historical = match historical {
+        Some(h) => h,
+        None => {
+            return RouteComparison {
+                distance_diff_pct: 0.0,
+                time_diff_pct: 0.0,
+                risk_diff_pct: 0.0,
+                similarity_score: 0.0,
+                waypoints_matched: 0,
+                total_waypoints: optimized.route_points.len() as i32,
+            }
+        }
+    };
+
+    let distance_diff_pct = if historical.distance_nautical_miles > 0.0 {
+        ((optimized.distance_nautical_miles - historical.distance_nautical_miles)
+            / historical.distance_nautical_miles * 100.0
+    } else {
+        0.0
+    };
+
+    let time_diff_pct = if historical.estimated_days > 0.0 {
+        ((optimized.estimated_days - historical.estimated_days)
+            / historical.estimated_days * 100.0
+    } else {
+        0.0
+    };
+
+    let risk_diff_pct = if historical.storm_risk > 0.0 {
+        ((optimized.storm_risk - historical.storm_risk) / historical.storm_risk) * 100.0
+    } else {
+        0.0
+    };
+
+    let similarity = path_similarity_score(&optimized.route_points, &historical.route_points);
+
+    let matched = (similarity * optimized.route_points.len() as f64) as i32;
+
+    RouteComparison {
+        distance_diff_pct,
+        time_diff_pct,
+        risk_diff_pct,
+        similarity_score: similarity,
+        waypoints_matched: matched,
+        total_waypoints: optimized.route_points.len() as i32,
+    }
+}

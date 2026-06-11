@@ -26,3 +26,8 @@ scrape_configs:
     static_configs:
       - targets: ['storm-risk-modeler:4003']
     metrics_path: '/'
+
+  - job_name: 'maritime-insights'
+    static_configs:
+      - targets: ['maritime-insights:4004']
+    metrics_path: '/metrics'

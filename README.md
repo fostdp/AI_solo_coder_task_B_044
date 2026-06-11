@@ -75,6 +75,7 @@
 | voyage_loader | 3001 | 4001 | 航海记录 + 前端静态文件 |
 | network_analyzer | 3002 | 4002 | 贸易网络重建 |
 | storm_risk_modeler | 3003 | 4003 | 风暴风险分析 |
+| maritime_insights | 3004 | 4004 | 综合洞察分析（4大模块） |
 | PostgreSQL | 5432 | — | PostGIS 空间数据库 |
 | Prometheus | 9090 | — | 指标采集 |
 | Grafana | 3000 | — | 可视化面板 |

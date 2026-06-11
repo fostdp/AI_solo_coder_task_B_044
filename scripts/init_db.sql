@@ -154,3 +154,211 @@ ANALYZE wind_fields;
 ANALYZE port_aliases;
 ANALYZE network_analysis_results;
 ANALYZE storm_risk_results;
+
+-- ============================================================
+-- 扩展表：港口兴衰分析、货物传播、航线规划、现代航运对比
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS historical_events (
+    id SERIAL PRIMARY KEY,
+    event_name VARCHAR(200) NOT NULL,
+    event_name_zh VARCHAR(200),
+    event_type VARCHAR(50) NOT NULL,
+    region VARCHAR(100),
+    start_year INTEGER NOT NULL,
+    end_year INTEGER,
+    severity NUMERIC(3,2),
+    affected_port_ids INTEGER[],
+    description TEXT,
+    source VARCHAR(200),
+    geom GEOMETRY(Point, 4326),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_hist_events_type ON historical_events(event_type);
+CREATE INDEX idx_hist_events_region ON historical_events(region);
+CREATE INDEX idx_hist_events_year ON historical_events(start_year);
+CREATE INDEX idx_hist_events_geom ON historical_events USING GIST(geom);
+
+CREATE TABLE IF NOT EXISTS port_yearly_flow (
+    id SERIAL PRIMARY KEY,
+    port_id INTEGER REFERENCES ports(id),
+    year INTEGER NOT NULL,
+    departure_count INTEGER DEFAULT 0,
+    arrival_count INTEGER DEFAULT 0,
+    total_flow INTEGER DEFAULT 0,
+    storm_count INTEGER DEFAULT 0,
+    storm_rate NUMERIC(5,4),
+    unique_cargo_types INTEGER DEFAULT 0,
+    unique_destinations INTEGER DEFAULT 0,
+    flow_rank INTEGER,
+    UNIQUE(port_id, year)
+);
+
+CREATE INDEX idx_port_flow_year ON port_yearly_flow(year);
+CREATE INDEX idx_port_flow_port ON port_yearly_flow(port_id);
+CREATE INDEX idx_port_flow_rank ON port_yearly_flow(flow_rank);
+
+CREATE TABLE IF NOT EXISTS cargo_spread_records (
+    id SERIAL PRIMARY KEY,
+    cargo_type VARCHAR(50) NOT NULL,
+    from_port_id INTEGER REFERENCES ports(id),
+    to_port_id INTEGER REFERENCES ports(id),
+    voyage_year INTEGER NOT NULL,
+    spread_direction VARCHAR(20) NOT NULL,
+    quantity_estimate NUMERIC(10,2),
+    cultural_significance TEXT,
+    spread_path_id INTEGER,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_cargo_spread_type ON cargo_spread_records(cargo_type);
+CREATE INDEX idx_cargo_spread_year ON cargo_spread_records(voyage_year);
+CREATE INDEX idx_cargo_spread_from ON cargo_spread_records(from_port_id);
+CREATE INDEX idx_cargo_spread_to ON cargo_spread_records(to_port_id);
+
+CREATE TABLE IF NOT EXISTS tech_diffusion_paths (
+    id SERIAL PRIMARY KEY,
+    tech_name VARCHAR(100) NOT NULL,
+    tech_name_zh VARCHAR(100),
+    tech_category VARCHAR(50),
+    origin_port_id INTEGER REFERENCES ports(id),
+    spread_route INTEGER[],
+    estimated_start_year INTEGER,
+    estimated_end_year INTEGER,
+    diffusion_speed_km_yr NUMERIC(8,2),
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_tech_diff_cat ON tech_diffusion_paths(tech_category);
+CREATE INDEX idx_tech_diff_start ON tech_diffusion_paths(estimated_start_year);
+
+CREATE TABLE IF NOT EXISTS route_planning_results (
+    id SERIAL PRIMARY KEY,
+    departure_port_id INTEGER REFERENCES ports(id),
+    arrival_port_id INTEGER REFERENCES ports(id),
+    departure_port_name VARCHAR(200),
+    arrival_port_name VARCHAR(200),
+    season VARCHAR(20) NOT NULL,
+    ship_type VARCHAR(50) NOT NULL,
+    method VARCHAR(50) NOT NULL,
+    route_points JSONB,
+    route_geom GEOMETRY(LineString, 4326),
+    distance_nautical_miles NUMERIC(10,2),
+    estimated_days NUMERIC(8,2),
+    avg_speed_knots NUMERIC(5,2),
+    storm_risk NUMERIC(5,4),
+    historical_deviation_pct NUMERIC(5,2),
+    historical_correlation NUMERIC(5,4),
+    computed_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_route_plan_dep ON route_planning_results(departure_port_id);
+CREATE INDEX idx_route_plan_arr ON route_planning_results(arrival_port_id);
+CREATE INDEX idx_route_plan_season ON route_planning_results(season);
+CREATE INDEX idx_route_plan_geom ON route_planning_results USING GIST(route_geom);
+
+CREATE TABLE IF NOT EXISTS modern_ships (
+    id SERIAL PRIMARY KEY,
+    ship_name VARCHAR(100),
+    mmsi VARCHAR(20) UNIQUE,
+    ship_type VARCHAR(50),
+    gross_tonnage NUMERIC(10,2),
+    length_m NUMERIC(6,2),
+    beam_m NUMERIC(5,2),
+    max_speed_knots NUMERIC(5,2),
+    flag VARCHAR(50),
+    home_port VARCHAR(100),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_modern_ships_type ON modern_ships(ship_type);
+CREATE INDEX idx_modern_ships_mmsi ON modern_ships(mmsi);
+
+CREATE TABLE IF NOT EXISTS modern_weather_forecasts (
+    id SERIAL PRIMARY KEY,
+    forecast_date DATE NOT NULL,
+    region VARCHAR(100),
+    wind_direction_deg NUMERIC(5,2),
+    wind_speed_knots NUMERIC(5,2),
+    wave_height_m NUMERIC(4,2),
+    current_direction_deg NUMERIC(5,2),
+    current_speed_knots NUMERIC(5,2),
+    visibility_nm NUMERIC(5,1),
+    storm_probability NUMERIC(5,4),
+    geom GEOMETRY(Polygon, 4326),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_modern_weather_date ON modern_weather_forecasts(forecast_date);
+CREATE INDEX idx_modern_weather_region ON modern_weather_forecasts(region);
+CREATE INDEX idx_modern_weather_geom ON modern_weather_forecasts USING GIST(geom);
+
+CREATE TABLE IF NOT EXISTS modern_risk_results (
+    id SERIAL PRIMARY KEY,
+    departure_port_id INTEGER REFERENCES ports(id),
+    arrival_port_id INTEGER REFERENCES ports(id),
+    forecast_date DATE,
+    model_type VARCHAR(50),
+    risk_score NUMERIC(5,4),
+    risk_level VARCHAR(20),
+    estimated_delay_hours NUMERIC(6,1),
+    alternative_route_suggestion TEXT,
+    ancient_comparison_score NUMERIC(5,4),
+    geom GEOMETRY(LineString, 4326),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_modern_risk_route ON modern_risk_results(departure_port_id, arrival_port_id);
+CREATE INDEX idx_modern_risk_score ON modern_risk_results(risk_score);
+CREATE INDEX idx_modern_risk_date ON modern_risk_results(forecast_date);
+CREATE INDEX idx_modern_risk_geom ON modern_risk_results USING GIST(geom);
+
+CREATE TABLE IF NOT EXISTS panel_regression_results (
+    id SERIAL PRIMARY KEY,
+    port_id INTEGER REFERENCES ports(id),
+    dependent_var VARCHAR(50),
+    model_type VARCHAR(50),
+    period_start INTEGER,
+    period_end INTEGER,
+    coefficients JSONB,
+    r_squared NUMERIC(5,4),
+    adj_r_squared NUMERIC(5,4),
+    f_statistic NUMERIC(8,4),
+    p_value NUMERIC(8,4),
+    n_observations INTEGER,
+    computed_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_panel_reg_port ON panel_regression_results(port_id);
+CREATE INDEX idx_panel_reg_period ON panel_regression_results(period_start, period_end);
+
+CREATE TABLE IF NOT EXISTS granger_causality_results (
+    id SERIAL PRIMARY KEY,
+    port_id INTEGER REFERENCES ports(id),
+    cause_variable VARCHAR(50),
+    effect_variable VARCHAR(50),
+    lag_order INTEGER,
+    f_statistic NUMERIC(8,4),
+    p_value NUMERIC(8,4),
+    is_significant BOOLEAN,
+    direction VARCHAR(20),
+    period_start INTEGER,
+    period_end INTEGER,
+    computed_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_granger_port ON granger_causality_results(port_id);
+CREATE INDEX idx_granger_signif ON granger_causality_results(is_significant);
+
+ANALYZE historical_events;
+ANALYZE port_yearly_flow;
+ANALYZE cargo_spread_records;
+ANALYZE tech_diffusion_paths;
+ANALYZE route_planning_results;
+ANALYZE modern_ships;
+ANALYZE modern_weather_forecasts;
+ANALYZE modern_risk_results;
+ANALYZE panel_regression_results;
+ANALYZE granger_causality_results;

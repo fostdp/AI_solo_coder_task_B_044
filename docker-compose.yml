@@ -94,6 +94,28 @@ services:
       - ./backend/config.toml:/app/config.toml
     restart: unless-stopped
 
+  maritime-insights:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        BINARY: maritime_insights
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/ancient_maritime
+      CONFIG_PATH: /app/config.toml
+      RUST_LOG: maritime_insights=info,tower_http=info,axum=info,sqlx=warn
+    ports:
+      - "3004:3004"
+      - "4004:4004"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      data-loader:
+        condition: service_completed_successfully
+    volumes:
+      - ./backend/config.toml:/app/config.toml
+    restart: unless-stopped
+
   data-loader:
     image: python:3.11-slim
     working_dir: /scripts
@@ -112,7 +134,8 @@ services:
       bash -c "
         pip install psycopg2-binary &&
         python simulate_voyages.py --db &&
-        python simulate_climate.py --db
+        python simulate_climate.py --db &&
+        python generate_insights_data.py
       "
 
   prometheus:

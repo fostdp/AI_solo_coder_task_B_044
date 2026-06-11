@@ -142,7 +142,59 @@
             </div>
 
             <div class="sidebar-section">
-                <h3>🗺️ 图层控制</h3>
+                <h3>⚖️ 古今风险对比</h3>
+                <div class="analysis-controls">
+                    <select id="compare-model">
+                        <option value="logistic_regression">逻辑回归</option>
+                        <option value="random_forest">随机森林</option>
+                    </select>
+                    <button id="btn-modern-compare" class="btn-analysis">开始对比分析</button>
+                </div>
+                <div class="compare-mode-group">
+                    <label class="compare-mode-label">显示模式</label>
+                    <div class="compare-mode-buttons">
+                        <label class="compare-mode-btn">
+                            <input type="radio" name="compare-mode" value="ancient" />
+                            <span>古代</span>
+                        </label>
+                        <label class="compare-mode-btn">
+                            <input type="radio" name="compare-mode" value="modern" />
+                            <span>现代</span>
+                        </label>
+                        <label class="compare-mode-btn">
+                            <input type="radio" name="compare-mode" value="both" checked />
+                            <span>叠加</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="opacity-control">
+                    <label class="opacity-label">
+                        现代图层透明度 <span id="modern-opacity-value">60%</span>
+                    </label>
+                    <input type="range" id="modern-opacity" min="0" max="1" step="0.05" value="0.6" />
+                </div>
+                <div id="comparison-info" class="analysis-result"></div>
+            </div>
+
+            <div class="sidebar-section">
+                <h3>� 港口兴衰分析</h3>
+                <div class="analysis-controls">
+                    <select id="port-select">
+                        <option value="">请选择港口</option>
+                    </select>
+                    <button id="btn-port-rise-fall" class="btn-analysis">分析兴衰因素</button>
+                </div>
+                <div id="rise-fall-summary" class="rise-fall-summary"></div>
+                <div id="rise-fall-result" class="rise-fall-result">
+                    <div id="regression-results" class="result-block"></div>
+                    <div id="granger-results" class="result-block"></div>
+                    <div id="factor-weights" class="result-block"></div>
+                    <div id="event-timeline" class="result-block"></div>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <h3>�🗺️ 图层控制</h3>
                 <div class="layer-controls">
                     <label><input type="checkbox" id="layer-routes" checked /> 航线</label>
                     <label><input type="checkbox" id="layer-ports" checked /> 港口</label>
@@ -150,6 +202,7 @@
                     <label><input type="checkbox" id="layer-network" /> 贸易网络</label>
                     <label><input type="checkbox" id="layer-heatmap" /> 风暴热力图</label>
                     <label><input type="checkbox" id="layer-currents" /> 洋流</label>
+                    <label><input type="checkbox" id="layer-events" /> 历史事件</label>
                 </div>
             </div>
         </div>
@@ -176,5 +229,9 @@
     <script src="js/timeline.js"></script>
     <script src="js/network.js"></script>
     <script src="js/storm.js"></script>
+    <script src="js/modern_comparison.js"></script>
+    <script src="js/cargo_spread.js"></script>
+    <script src="js/port_rise_fall.js"></script>
+    <script src="js/route_planning.js"></script>
 </body>
 </html>

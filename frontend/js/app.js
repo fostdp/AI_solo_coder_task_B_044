@@ -4,6 +4,7 @@ const API_SERVICES = (function () {
             voyage_loader: window.__API_GATEWAY__,
             network_analyzer: window.__API_GATEWAY__,
             storm_risk_modeler: window.__API_GATEWAY__,
+            maritime_insights: window.__API_GATEWAY__,
         };
     }
     const host = location.hostname || 'localhost';
@@ -14,12 +15,14 @@ const API_SERVICES = (function () {
             voyage_loader: base,
             network_analyzer: window.__NETWORK_ANALYZER_URL__ || `http://${host}:3002`,
             storm_risk_modeler: window.__STORM_RISK_URL__ || `http://${host}:3003`,
+            maritime_insights: window.__MARITIME_INSIGHTS_URL__ || `http://${host}:3004`,
         };
     }
     return {
         voyage_loader: window.__VOYAGE_LOADER_URL__ || `http://${host}:3001`,
         network_analyzer: window.__NETWORK_ANALYZER_URL__ || `http://${host}:3002`,
         storm_risk_modeler: window.__STORM_RISK_URL__ || `http://${host}:3003`,
+        maritime_insights: window.__MARITIME_INSIGHTS_URL__ || `http://${host}:3004`,
     };
 })();
 
@@ -32,6 +35,7 @@ const API_ROUTE_MAP = {
     '/climate/winds': 'voyage_loader',
     '/network': 'network_analyzer',
     '/storm-risk': 'storm_risk_modeler',
+    '/insights': 'maritime_insights',
 };
 
 function resolveApiEndpoint(endpoint) {
@@ -56,6 +60,13 @@ const AppState = {
     networkData: null,
     stormData: null,
     heatmapLayer: null,
+    modernCompare: {
+        loaded: false,
+        data: null,
+        viewMode: 'both',
+        modernOpacity: 0.6,
+    },
+    cargoSpreadData: null,
     layers: {
         routes: true,
         ports: true,
@@ -63,6 +74,7 @@ const AppState = {
         network: false,
         heatmap: false,
         currents: false,
+        cargoSpread: false,
     },
 };
 
@@ -161,6 +173,9 @@ async function loadInitialData() {
         ]);
         AppState.ports = portsResp.ports || [];
         updateStats(statsResp);
+        if (typeof PortRiseFall !== 'undefined') {
+            PortRiseFall.refreshPortList();
+        }
         return true;
     } catch (e) {
         console.error('Failed to load initial data:', e);
@@ -259,17 +274,42 @@ function initEventListeners() {
         AppState.layers.currents = e.target.checked;
         renderMapLayers();
     });
+
+    document.getElementById('layer-events').addEventListener('change', (e) => {
+        AppState.layers.events = e.target.checked;
+        if (typeof PortRiseFall !== 'undefined') {
+            PortRiseFall.toggleEventLayer(e.target.checked);
+        }
+    });
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
     initMap();
     initTimeline();
     initEventListeners();
+    if (typeof ModernComparison !== 'undefined') {
+        ModernComparison.init();
+    }
+    if (typeof PortRiseFall !== 'undefined') {
+        PortRiseFall.init();
+    }
+    if (typeof initCargoSpread !== 'undefined') {
+        initCargoSpread();
+    }
+    if (typeof initRoutePlanning !== 'undefined') {
+        initRoutePlanning();
+    }
 
     const ok = await loadInitialData();
     if (ok) {
         renderPorts();
         await loadVoyages();
         renderMapLayers();
+        if (typeof refreshPortSelects === 'function') {
+            refreshPortSelects();
+        }
+        if (typeof populateRpPortSelects === 'function') {
+            populateRpPortSelects();
+        }
     }
 });

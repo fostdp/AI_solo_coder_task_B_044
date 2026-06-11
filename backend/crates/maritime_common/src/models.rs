@@ -280,3 +280,273 @@ pub struct StormAnalysisResponse {
     pub heatmap: Vec<StormHeatmapPoint>,
     pub model_type: String,
 }
+
+// ============ 港口兴衰分析 ============
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct HistoricalEvent {
+    pub id: i32,
+    pub event_name: String,
+    pub event_name_zh: Option<String>,
+    pub event_type: String,
+    pub region: Option<String>,
+    pub start_year: i32,
+    pub end_year: Option<i32>,
+    pub severity: Option<f64>,
+    pub description: Option<String>,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PortYearlyFlow {
+    pub port_id: i32,
+    pub year: i32,
+    pub total_flow: i32,
+    pub departure_count: i32,
+    pub arrival_count: i32,
+    pub storm_count: i32,
+    pub storm_rate: Option<f64>,
+    pub unique_cargo_types: i32,
+    pub unique_destinations: i32,
+    pub flow_rank: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegressionCoefficient {
+    pub variable: String,
+    pub variable_zh: String,
+    pub coefficient: f64,
+    pub standard_error: f64,
+    pub t_statistic: f64,
+    pub p_value: f64,
+    pub is_significant: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PanelRegressionResult {
+    pub port_id: i32,
+    pub port_name: String,
+    pub dependent_var: String,
+    pub model_type: String,
+    pub period_start: i32,
+    pub period_end: i32,
+    pub coefficients: Vec<RegressionCoefficient>,
+    pub r_squared: f64,
+    pub adj_r_squared: f64,
+    pub f_statistic: f64,
+    pub p_value: f64,
+    pub n_observations: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrangerCausalityResult {
+    pub port_id: i32,
+    pub cause_variable: String,
+    pub cause_variable_zh: String,
+    pub effect_variable: String,
+    pub effect_variable_zh: String,
+    pub lag_order: i32,
+    pub f_statistic: f64,
+    pub p_value: f64,
+    pub is_significant: bool,
+    pub direction: String,
+    pub period_start: i32,
+    pub period_end: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortRiseFallResponse {
+    pub port_flows: Vec<PortYearlyFlow>,
+    pub historical_events: Vec<HistoricalEvent>,
+    pub regression_results: Vec<PanelRegressionResult>,
+    pub granger_results: Vec<GrangerCausalityResult>,
+    pub factor_weights: Vec<FactorWeight>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FactorWeight {
+    pub factor: String,
+    pub factor_zh: String,
+    pub avg_coefficient: f64,
+    pub significance_rate: f64,
+    pub importance_rank: i32,
+}
+
+// ============ 航线规划 ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutePlanningResult {
+    pub departure_port_id: i32,
+    pub arrival_port_id: i32,
+    pub departure_port_name: String,
+    pub arrival_port_name: String,
+    pub season: String,
+    pub ship_type: String,
+    pub method: String,
+    pub route_points: Vec<Vec<f64>>,
+    pub distance_nautical_miles: f64,
+    pub estimated_days: f64,
+    pub avg_speed_knots: f64,
+    pub storm_risk: f64,
+    pub historical_deviation_pct: f64,
+    pub historical_correlation: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutePlanningResponse {
+    pub optimized_route: RoutePlanningResult,
+    pub historical_route: Option<RoutePlanningResult>,
+    pub comparison: RouteComparison,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteComparison {
+    pub distance_diff_pct: f64,
+    pub time_diff_pct: f64,
+    pub risk_diff_pct: f64,
+    pub similarity_score: f64,
+    pub waypoints_matched: i32,
+    pub total_waypoints: i32,
+}
+
+// ============ 货物传播 ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CargoSpreadRecord {
+    pub cargo_type: String,
+    pub from_port_id: i32,
+    pub to_port_id: i32,
+    pub voyage_year: i32,
+    pub spread_direction: String,
+    pub quantity_estimate: f64,
+    pub cultural_significance: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TechDiffusionPath {
+    pub id: i32,
+    pub tech_name: String,
+    pub tech_name_zh: String,
+    pub tech_category: String,
+    pub origin_port_id: i32,
+    pub origin_port_name: String,
+    pub spread_route: Vec<i32>,
+    pub estimated_start_year: i32,
+    pub estimated_end_year: i32,
+    pub diffusion_speed_km_yr: f64,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CargoSpreadResponse {
+    pub cargo_type: String,
+    pub spread_records: Vec<CargoSpreadRecord>,
+    pub tech_diffusions: Vec<TechDiffusionPath>,
+    pub spread_network: SpreadNetwork,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpreadNetwork {
+    pub nodes: Vec<SpreadNode>,
+    pub edges: Vec<SpreadEdge>,
+    pub origin_ports: Vec<i32>,
+    pub hub_ports: Vec<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpreadNode {
+    pub port_id: i32,
+    pub port_name: String,
+    pub first_received_year: i32,
+    pub adoption_level: f64,
+    pub betweenness: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpreadEdge {
+    pub from_port_id: i32,
+    pub to_port_id: i32,
+    pub flow_volume: f64,
+    pub first_spread_year: i32,
+}
+
+// ============ 现代航运对比 ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModernShip {
+    pub id: i32,
+    pub ship_name: String,
+    pub mmsi: String,
+    pub ship_type: String,
+    pub gross_tonnage: f64,
+    pub length_m: f64,
+    pub beam_m: f64,
+    pub max_speed_knots: f64,
+    pub flag: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModernWeatherForecast {
+    pub region: String,
+    pub wind_direction_deg: f64,
+    pub wind_speed_knots: f64,
+    pub wave_height_m: f64,
+    pub current_direction_deg: f64,
+    pub current_speed_knots: f64,
+    pub storm_probability: f64,
+    pub lat: f64,
+    pub lon: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModernRiskResult {
+    pub departure_port_id: i32,
+    pub arrival_port_id: i32,
+    pub risk_score: f64,
+    pub risk_level: String,
+    pub model_type: String,
+    pub ancient_comparison_score: f64,
+    pub route_points: Vec<Vec<f64>>,
+    pub estimated_delay_hours: f64,
+    pub alternative_route_suggestion: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModernComparisonResponse {
+    pub ancient_risks: Vec<StormRiskResult>,
+    pub modern_risks: Vec<ModernRiskResult>,
+    pub comparison_summary: RiskComparisonSummary,
+    pub heatmap_ancient: Vec<StormHeatmapPoint>,
+    pub heatmap_modern: Vec<StormHeatmapPoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskComparisonSummary {
+    pub avg_ancient_risk: f64,
+    pub avg_modern_risk: f64,
+    pub risk_reduction_pct: f64,
+    pub high_risk_routes_ancient: i32,
+    pub high_risk_routes_modern: i32,
+    pub most_dangerous_region_ancient: String,
+    pub most_dangerous_region_modern: String,
+    pub correlation_coefficient: f64,
+}
+
+// ============ 通用查询参数 ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InsightsQuery {
+    pub year_start: Option<i32>,
+    pub year_end: Option<i32>,
+    pub port_id: Option<i32>,
+    pub region: Option<String>,
+    pub model_type: Option<String>,
+    pub analysis_type: Option<String>,
+    pub cargo_type: Option<String>,
+    pub season: Option<String>,
+    pub ship_type: Option<String>,
+    pub departure_port_id: Option<i32>,
+    pub arrival_port_id: Option<i32>,
+    pub lag_order: Option<i32>,
+}

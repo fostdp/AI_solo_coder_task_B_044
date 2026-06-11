@@ -80,5 +80,11 @@ function onTimelineChange() {
     timelineDebounce = setTimeout(async () => {
         await loadVoyages();
         renderMapLayers();
+        if (typeof PortRiseFall !== 'undefined') {
+            PortRiseFall.onTimeRangeChange();
+        }
+        if (typeof ModernComparison !== 'undefined' && AppState.modernCompare?.loaded) {
+            await ModernComparison.load();
+        }
     }, 300);
 }
