@@ -3,11 +3,10 @@ use std::net::SocketAddr;
 
 use axum::{
     Router,
-    routing::{get, post},
+    routing::get,
     http::StatusCode,
     Json,
     extract::{Query, State},
-    middleware,
 };
 use tower_http::cors::CorsLayer;
 use tower_http::compression::CompressionLayer;
@@ -23,10 +22,11 @@ use maritime_common::config::AppConfig;
 use maritime_common::db::create_db_pool;
 use maritime_common::models::InsightsQuery;
 
-mod port_rise_fall;
-mod route_planning;
-mod cargo_spread;
-mod modern_comparison;
+use port_rise_fall as port_rise_fall_mod;
+use route_simulator as route_simulator_mod;
+use goods_spread_network as goods_spread_network_mod;
+use modern_shipping_comparator as modern_shipping_comparator_mod;
+
 mod handlers;
 
 use handlers::*;
@@ -38,6 +38,7 @@ struct AppState {
     rng: Arc<std::sync::Mutex<StdRng>>,
     http_requests_total: IntCounterVec,
     http_request_duration: HistogramVec,
+    regression_worker: Arc<Option<std::sync::mpsc::SyncSender<port_rise_fall_mod::regression_service::RegressionRequest>>>,
 }
 
 async fn health_check() -> StatusCode {
@@ -63,7 +64,7 @@ async fn metrics_handler(State(state): State<AppState>) -> Result<String, Status
 async fn get_port_rise_fall(
     State(state): State<AppState>,
     Query(query): Query<InsightsQuery>,
-) -> Result<Json<port_rise_fall::PortRiseFallResponse>, StatusCode> {
+) -> Result<Json<port_rise_fall_mod::PortRiseFallResponse>, StatusCode> {
     state.http_requests_total
         .with_label_values(&["GET", "/api/insights/port-rise-fall"])
         .inc();
@@ -71,14 +72,19 @@ async fn get_port_rise_fall(
         .with_label_values(&["GET", "/api/insights/port-rise-fall"])
         .start_timer();
 
-    let result = port_rise_fall::get_port_rise_fall_analysis(
-        &state.db_pool,
-        &state.config.maritime_insights,
-        query.year_start,
-        query.year_end,
-        query.port_id,
-        query.region,
-    ).await;
+    let config_clone = state.config.maritime_insights.clone();
+    let pool = state.db_pool.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(port_rise_fall_mod::get_port_rise_fall_analysis(
+            &pool,
+            &config_clone,
+            query.year_start,
+            query.year_end,
+            query.port_id,
+            query.region,
+        ))
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     timer.observe_duration();
     Ok(Json(result))
@@ -87,7 +93,7 @@ async fn get_port_rise_fall(
 async fn get_route_planning(
     State(state): State<AppState>,
     Query(query): Query<InsightsQuery>,
-) -> Result<Json<route_planning::RoutePlanningResponse>, StatusCode> {
+) -> Result<Json<route_simulator_mod::RoutePlanningResponse>, StatusCode> {
     state.http_requests_total
         .with_label_values(&["GET", "/api/insights/route-planning"])
         .inc();
@@ -97,28 +103,34 @@ async fn get_route_planning(
 
     let dep_id = query.departure_port_id.ok_or(StatusCode::BAD_REQUEST)?;
     let arr_id = query.arrival_port_id.ok_or(StatusCode::BAD_REQUEST)?;
-    let season = query.season.as_deref().unwrap_or("summer");
-    let ship_type = query.ship_type.as_deref().unwrap_or("merchant_round_ship");
+    let season = query.season.clone().unwrap_or_else(|| "summer".to_string());
+    let ship_type = query.ship_type.clone().unwrap_or_else(|| "merchant_round_ship".to_string());
 
-    let optimized = route_planning::plan_optimal_route(
+    let route_config = state.config.maritime_insights.route_planning.clone();
+    let pool = state.db_pool.clone();
+    let optimized = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(route_simulator_mod::plan_optimal_route(
+            &pool,
+            &route_config,
+            dep_id,
+            arr_id,
+            &season,
+            &ship_type,
+        ))
+    }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+      .ok_or(StatusCode::NOT_FOUND)?;
+
+    let historical = route_simulator_mod::get_historical_route(
         &state.db_pool,
-        &state.config.maritime_insights.route_planning,
         dep_id,
         arr_id,
-        season,
-        ship_type,
-    ).await.ok_or(StatusCode::NOT_FOUND)?;
-
-    let historical = route_planning::get_historical_route(
-        &state.db_pool,
-        dep_id,
-        arr_id,
-        season,
+        &season,
     ).await;
 
-    let comparison = route_planning::compare_routes(&optimized, historical.as_ref());
+    let comparison = route_simulator_mod::compare_routes(&optimized, historical.as_ref());
 
-    let response = route_planning::RoutePlanningResponse {
+    let response = route_simulator_mod::RoutePlanningResponse {
         optimized_route: optimized,
         historical_route: historical,
         comparison,
@@ -131,7 +143,7 @@ async fn get_route_planning(
 async fn get_cargo_spread(
     State(state): State<AppState>,
     Query(query): Query<InsightsQuery>,
-) -> Result<Json<cargo_spread::CargoSpreadResponse>, StatusCode> {
+) -> Result<Json<goods_spread_network_mod::CargoSpreadResponse>, StatusCode> {
     state.http_requests_total
         .with_label_values(&["GET", "/api/insights/cargo-spread"])
         .inc();
@@ -143,7 +155,7 @@ async fn get_cargo_spread(
     let year_start = query.year_start.unwrap_or(-1000);
     let year_end = query.year_end.unwrap_or(1800);
 
-    let result = cargo_spread::analyze_cargo_spread(
+    let result = goods_spread_network_mod::analyze_cargo_spread(
         &state.db_pool,
         &state.config.maritime_insights.cargo_spread,
         cargo_type,
@@ -158,7 +170,7 @@ async fn get_cargo_spread(
 async fn get_modern_comparison(
     State(state): State<AppState>,
     Query(query): Query<InsightsQuery>,
-) -> Result<Json<modern_comparison::ModernComparisonResponse>, StatusCode> {
+) -> Result<Json<modern_shipping_comparator_mod::ModernComparisonResponse>, StatusCode> {
     state.http_requests_total
         .with_label_values(&["GET", "/api/insights/modern-comparison"])
         .inc();
@@ -166,7 +178,7 @@ async fn get_modern_comparison(
         .with_label_values(&["GET", "/api/insights/modern-comparison"])
         .start_timer();
 
-    let result = modern_comparison::get_modern_comparison(
+    let result = modern_shipping_comparator_mod::get_modern_comparison(
         &state.db_pool,
         &state.config.maritime_insights.modern_comparison,
         &query,
@@ -209,6 +221,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = create_db_pool(&config.database).await?;
 
     info!("Maritime Insights service starting on port {}", config.maritime_insights.port);
+    info!("Delegated modules: port_rise_fall, route_simulator, goods_spread_network, modern_shipping_comparator");
+
+    let regression_worker = port_rise_fall_mod::regression_service::start_regression_worker(
+        config.maritime_insights.panel_regression.clone(),
+    );
 
     let http_requests_total = IntCounterVec::new(
         Opts::new("http_requests_total", "Total HTTP requests"),
@@ -228,6 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rng,
         http_requests_total: http_requests_total.clone(),
         http_request_duration: http_request_duration.clone(),
+        regression_worker: Arc::new(Some(regression_worker)),
     };
 
     let metrics_state = state.clone();

@@ -1,0 +1,8 @@
+d:\SOLO-2\AI_solo_coder_task_B_044\target_check\debug\deps\windows_link-3fe80788267f4d9a.d: C:\Users\y\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows-link-0.2.1\src\lib.rs C:\Users\y\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows-link-0.2.1\src\../readme.md
+
+d:\SOLO-2\AI_solo_coder_task_B_044\target_check\debug\deps\libwindows_link-3fe80788267f4d9a.rlib: C:\Users\y\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows-link-0.2.1\src\lib.rs C:\Users\y\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows-link-0.2.1\src\../readme.md
+
+d:\SOLO-2\AI_solo_coder_task_B_044\target_check\debug\deps\libwindows_link-3fe80788267f4d9a.rmeta: C:\Users\y\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows-link-0.2.1\src\lib.rs C:\Users\y\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows-link-0.2.1\src\../readme.md
+
+C:\Users\y\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows-link-0.2.1\src\lib.rs:
+C:\Users\y\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows-link-0.2.1\src\../readme.md:

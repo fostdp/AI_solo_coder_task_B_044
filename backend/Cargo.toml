@@ -5,5 +5,9 @@ members = [
     "crates/network_analyzer",
     "crates/storm_risk_modeler",
     "crates/maritime_insights",
+    "crates/route_simulator",
+    "crates/modern_shipping_comparator",
+    "crates/port_rise_fall",
+    "crates/goods_spread_network",
 ]
 resolver = "2"

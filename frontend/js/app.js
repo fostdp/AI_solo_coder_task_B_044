@@ -173,8 +173,8 @@ async function loadInitialData() {
         ]);
         AppState.ports = portsResp.ports || [];
         updateStats(statsResp);
-        if (typeof PortRiseFall !== 'undefined') {
-            PortRiseFall.refreshPortList();
+        if (typeof PortRiseFallComponent !== 'undefined') {
+            PortRiseFallComponent.refreshPortList();
         }
         return true;
     } catch (e) {
@@ -277,8 +277,8 @@ function initEventListeners() {
 
     document.getElementById('layer-events').addEventListener('change', (e) => {
         AppState.layers.events = e.target.checked;
-        if (typeof PortRiseFall !== 'undefined') {
-            PortRiseFall.toggleEventLayer(e.target.checked);
+        if (typeof PortRiseFallComponent !== 'undefined') {
+            PortRiseFallComponent.toggleEventLayer(e.target.checked);
         }
     });
 }
@@ -287,17 +287,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     initMap();
     initTimeline();
     initEventListeners();
-    if (typeof ModernComparison !== 'undefined') {
-        ModernComparison.init();
+    if (typeof ModernShippingComparatorComponent !== 'undefined') {
+        ModernShippingComparatorComponent.init();
     }
-    if (typeof PortRiseFall !== 'undefined') {
-        PortRiseFall.init();
+    if (typeof PortRiseFallComponent !== 'undefined') {
+        PortRiseFallComponent.init();
     }
-    if (typeof initCargoSpread !== 'undefined') {
-        initCargoSpread();
+    if (typeof GoodsSpreadNetworkComponent !== 'undefined') {
+        GoodsSpreadNetworkComponent.init();
     }
-    if (typeof initRoutePlanning !== 'undefined') {
-        initRoutePlanning();
+    if (typeof RouteSimulatorComponent !== 'undefined') {
+        RouteSimulatorComponent.init();
     }
 
     const ok = await loadInitialData();
@@ -305,11 +305,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         renderPorts();
         await loadVoyages();
         renderMapLayers();
-        if (typeof refreshPortSelects === 'function') {
-            refreshPortSelects();
+        if (typeof PortRiseFallComponent !== 'undefined') {
+            PortRiseFallComponent.refreshPortList();
         }
-        if (typeof populateRpPortSelects === 'function') {
-            populateRpPortSelects();
+        if (typeof RouteSimulatorComponent !== 'undefined') {
+            RouteSimulatorComponent.populatePortSelects();
         }
     }
 });

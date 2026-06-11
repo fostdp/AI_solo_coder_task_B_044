@@ -596,6 +596,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "goods-spread-network"
+version = "0.1.0"
+dependencies = [
+ "maritime-common",
+ "rand",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1056,9 +1068,13 @@ name = "maritime-insights"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "goods-spread-network",
  "maritime-common",
+ "modern-shipping-comparator",
+ "port-rise-fall",
  "prometheus",
  "rand",
+ "route-simulator",
  "serde",
  "serde_json",
  "sqlx",
@@ -1185,6 +1201,17 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "modern-shipping-comparator"
+version = "0.1.0"
+dependencies = [
+ "maritime-common",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
 ]
 
 [[package]]
@@ -1367,6 +1394,18 @@ name = "plain"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
+
+[[package]]
+name = "port-rise-fall"
+version = "0.1.0"
+dependencies = [
+ "maritime-common",
+ "rand",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+]
 
 [[package]]
 name = "portable-atomic"
@@ -1554,6 +1593,18 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "route-simulator"
+version = "0.1.0"
+dependencies = [
+ "maritime-common",
+ "rand",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
 ]
 
 [[package]]

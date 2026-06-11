@@ -1,0 +1,5 @@
+d:\SOLO-2\AI_solo_coder_task_B_044\target_check\debug\deps\stable_deref_trait-3f46ad6dcd13377b.d: C:\Users\y\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\stable_deref_trait-1.2.1\src\lib.rs
+
+d:\SOLO-2\AI_solo_coder_task_B_044\target_check\debug\deps\libstable_deref_trait-3f46ad6dcd13377b.rmeta: C:\Users\y\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\stable_deref_trait-1.2.1\src\lib.rs
+
+C:\Users\y\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\stable_deref_trait-1.2.1\src\lib.rs:
